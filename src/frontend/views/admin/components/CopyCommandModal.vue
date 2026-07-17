@@ -53,12 +53,6 @@
           </div>
         </div>
         <div class="form-group flex-1">
-          <label class="form-label">{{ trans.pingMode }}</label>
-          <div class="flex items-center gap-2">
-            <input type="text" readonly :value="pingMode.toUpperCase()" class="form-input">
-          </div>
-        </div>
-        <div class="form-group flex-1">
           <label class="form-label">{{ trans.trafficResetDay }}</label>
           <div class="flex items-center gap-2">
             <input type="text" readonly :value="resetDay" class="form-input">
@@ -102,7 +96,6 @@ defineProps({
   targetOs: { type: String, default: 'linux' },
   collectInterval: { type: [Number, String], default: 0 },
   reportInterval: { type: [Number, String], default: 60 },
-  pingMode: { type: String, default: 'tcp' },
   customCt: { type: String, default: '' },
   customCu: { type: String, default: '' },
   customCm: { type: String, default: '' },

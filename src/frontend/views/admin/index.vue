@@ -177,7 +177,6 @@
         :target-os="targetOs"
         :collect-interval="collectInterval"
         :report-interval="reportInterval"
-        :ping-mode="pingMode"
         :custom-ct="customCt"
         :custom-cu="customCu"
         :custom-cm="customCm"
@@ -551,7 +550,6 @@ const editForm = ref({
   reset_day: 1,
   collect_interval: 0,
   report_interval: 60,
-  ping_mode: 'tcp',
   custom_ct: '',
   custom_cu: '',
   custom_cm: '',
@@ -592,7 +590,6 @@ const currentServerName = ref('')
 const targetOs = ref('linux')
 const collectInterval = ref(0)
 const reportInterval = ref(60)
-const pingMode = ref('tcp')
 const customCt = ref('')
 const customCu = ref('')
 const customCm = ref('')
@@ -972,7 +969,6 @@ const copyCmd = (serverId) => {
   targetOs.value = 'linux'
   collectInterval.value = server?.collect_interval ?? 0
   reportInterval.value = server?.report_interval || 60
-  pingMode.value = server?.ping_mode || 'http'
   customCt.value = server?.custom_ct || settings.value.custom_ct
   customCu.value = server?.custom_cu || settings.value.custom_cu
   customCm.value = server?.custom_cm || settings.value.custom_cm
@@ -996,7 +992,6 @@ const getCustomInstallCommand = () => {
       `-Url '${HOST}/update'`,
       `-CollectInterval ${collectInterval.value}`,
       `-ReportInterval ${reportInterval.value}`,
-      `-PingType ${pingMode.value}`,
       `-ResetDay ${resetDay.value ?? 1}`
     ]
     if (customCt.value) params.push(`-CtNode '${customCt.value}'`)
@@ -1013,7 +1008,7 @@ const getCustomInstallCommand = () => {
     : targetOs.value === 'openwrt' ? 'install-openwrt.sh'
     : targetOs.value === 'mac' ? 'install-mac.sh'
     : 'install.sh'
-  let cmd = `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s install -id=${copyServerId.value} -secret='${apiSecret.value}' -url=${HOST}/update -collect_interval=${collectInterval.value} -interval=${reportInterval.value} -ping=${pingMode.value} -reset_day=${resetDay.value ?? 1}`
+  let cmd = `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s install -id=${copyServerId.value} -secret='${apiSecret.value}' -url=${HOST}/update -collect_interval=${collectInterval.value} -interval=${reportInterval.value} -reset_day=${resetDay.value ?? 1}`
   if (customCt.value) cmd += ` -ct=${customCt.value}`
   if (customCu.value) cmd += ` -cu=${customCu.value}`
   if (customCm.value) cmd += ` -cm=${customCm.value}`
@@ -1077,7 +1072,6 @@ const openEditModal = (server) => {
     reset_day: server.reset_day ?? 1,
     collect_interval: server.collect_interval ?? 0,
     report_interval: server.report_interval || 60,
-    ping_mode: server.ping_mode || 'http',
     custom_ct: server.custom_ct || '',
     custom_cu: server.custom_cu || '',
     custom_cm: server.custom_cm || '',
@@ -1110,7 +1104,6 @@ const saveEdit = async () => {
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
     report_interval: editForm.value.report_interval,
-    ping_mode: editForm.value.ping_mode,
     custom_ct: editForm.value.custom_ct,
     custom_cu: editForm.value.custom_cu,
     custom_cm: editForm.value.custom_cm,

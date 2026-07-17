@@ -49,7 +49,6 @@ print_usage() {
     echo "可选参数:"
     echo "  -interval=N    上报间隔(秒)，默认60"
     echo "  -collect_interval=N    采样间隔(秒)，默认0"
-    echo "  -ping=TYPE     探测类型: http | tcp，默认http"
     echo "  -ct=HOST       自定义CT测试节点"
     echo "  -cu=HOST       自定义CU测试节点"
     echo "  -cm=HOST       自定义CM测试节点"
@@ -94,6 +93,7 @@ check_dependencies() {
         error "缺少必要的系统命令: $missing"
     fi
     info "所有依赖检测通过"
+
 }
 
 stop_old_service() {
@@ -130,7 +130,6 @@ SECRET=""
 WORKER_URL=""
 COLLECT_INTERVAL=""
 REPORT_INTERVAL=""
-PING_TYPE=""
 CT_NODE=""
 CU_NODE=""
 CM_NODE=""
@@ -145,7 +144,6 @@ while IFS='=' read -r key value; do
         WORKER_URL) WORKER_URL="${value%\"}"; WORKER_URL="${WORKER_URL#\"}" ;;
         COLLECT_INTERVAL) COLLECT_INTERVAL="${value%\"}"; COLLECT_INTERVAL="${COLLECT_INTERVAL#\"}" ;;
         REPORT_INTERVAL) REPORT_INTERVAL="${value%\"}"; REPORT_INTERVAL="${REPORT_INTERVAL#\"}" ;;
-        PING_TYPE) PING_TYPE="${value%\"}"; PING_TYPE="${PING_TYPE#\"}" ;;
         CT_NODE) CT_NODE="${value%\"}"; CT_NODE="${CT_NODE#\"}" ;;
         CU_NODE) CU_NODE="${value%\"}"; CU_NODE="${CU_NODE#\"}" ;;
         CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
@@ -157,7 +155,6 @@ done < "${CONFIG_FILE}"
 
 COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
 REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-PING_TYPE=${PING_TYPE:-http}
 [ -z "${RESET_DAY:-}" ] && RESET_DAY=1
 case "${COLLECT_INTERVAL:-}" in ''|*[!0-9]*) COLLECT_INTERVAL=0 ;; esac
 case "${REPORT_INTERVAL:-}" in ''|*[!0-9]*) REPORT_INTERVAL=60 ;; esac
@@ -179,20 +176,44 @@ log_info() {
 }
 
 log_debug() {
-    [ "$DEBUG_MODE" = "1" ] && echo "[DEBUG] $(log_ts) $*"
+    [ "$DEBUG_MODE" = "1" ] && echo "[DEBUG] $(log_ts) $*" >&2
 }
 
 log_warn_debug() {
     [ "$DEBUG_MODE" = "1" ] && echo "[WARN] $(log_ts) $*"
 }
 
+# 动态检测 stdout 指向的日志文件
+PROBE_LOG_FILE=""
+if [ -L /dev/fd/1 ]; then
+    _log_target=$(readlink /dev/fd/1 2>/dev/null || echo "")
+    [ -f "$_log_target" ] && [ -w "$_log_target" ] && PROBE_LOG_FILE="$_log_target"
+fi
+
+rotate_log_if_needed() {
+    [ -f "$1" ] || return 0
+    local _sz
+    _sz=$(wc -c < "$1" 2>/dev/null || echo 0)
+    [ "${_sz:-0}" -gt 1048576 ] || return 0
+    local _lines
+    _lines=$(wc -l < "$1" 2>/dev/null || echo 0)
+    if [ "${_lines}" -eq 1 ]; then
+        : > "$1" 2>/dev/null
+        return 0
+    fi
+    local _tmp="${1}.rot.$$"
+    tail -c 102400 "$1" > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 0; }
+    : > "$1" 2>/dev/null
+    cat "$_tmp" >> "$1" 2>/dev/null || true
+    rm -f "$_tmp" 2>/dev/null || true
+}
+
 persist_dynamic_config() {
     local tmp_file="${CONFIG_FILE}.tmp.$$"
-    awk -v collect="$1" -v report="$2" -v ping="$3" -v reset="$4" -v md5="$5" -v ct="$6" -v cu="$7" -v cm="$8" -v bd="$9" '
-        BEGIN { c=0; r=0; p=0; d=0; m=0; tct=0; tcu=0; tcm=0; tbd=0 }
+    awk -v collect="$1" -v report="$2" -v reset="$3" -v md5="$4" -v ct="$5" -v cu="$6" -v cm="$7" -v bd="$8" '
+        BEGIN { c=0; r=0; d=0; m=0; tct=0; tcu=0; tcm=0; tbd=0 }
         /^COLLECT_INTERVAL=/ { print "COLLECT_INTERVAL=\"" collect "\""; c=1; next }
         /^REPORT_INTERVAL=/ { print "REPORT_INTERVAL=\"" report "\""; r=1; next }
-        /^PING_TYPE=/ { print "PING_TYPE=\"" ping "\""; p=1; next }
         /^RESET_DAY=/ { print "RESET_DAY=\"" reset "\""; d=1; next }
         /^CONFIG_MD5=/ { print "CONFIG_MD5=\"" md5 "\""; m=1; next }
         /^CT_NODE=/ { print "CT_NODE=\"" ct "\""; tct=1; next }
@@ -203,7 +224,6 @@ persist_dynamic_config() {
         END {
             if (!c) print "COLLECT_INTERVAL=\"" collect "\""
             if (!r) print "REPORT_INTERVAL=\"" report "\""
-            if (!p) print "PING_TYPE=\"" ping "\""
             if (!d) print "RESET_DAY=\"" reset "\""
             if (!m) print "CONFIG_MD5=\"" md5 "\""
             if (!tct) print "CT_NODE=\"" ct "\""
@@ -219,7 +239,7 @@ persist_dynamic_config() {
 
 apply_remote_config() {
     local response_file="$1" header_file="$2" body bytes new_md5
-    local new_collect new_ping new_report new_reset new_schema new_ct new_cu new_cm new_bd
+    local new_collect new_report new_reset new_schema new_ct new_cu new_cm new_bd
     local new_rx_corr new_tx_corr
     bytes=$(wc -c < "$response_file" 2>/dev/null || echo 9999)
     [ "$bytes" -le 1024 ] || return 1
@@ -229,37 +249,34 @@ apply_remote_config() {
     [ "${#new_md5}" -eq 32 ] || return 1
     case "$new_md5" in *[!0-9a-f]*) return 1 ;; esac
 
-    new_collect=$(printf '%s' "$body" | cut -d '&' -f 1); new_collect=${new_collect#collect_interval=}
-    new_ping=$(printf '%s' "$body" | cut -d '&' -f 2); new_ping=${new_ping#ping_mode=}
-    new_report=$(printf '%s' "$body" | cut -d '&' -f 3); new_report=${new_report#report_interval=}
-    new_reset=$(printf '%s' "$body" | cut -d '&' -f 4); new_reset=${new_reset#reset_day=}
-    new_schema=$(printf '%s' "$body" | cut -d '&' -f 5); new_schema=${new_schema#schema_version=}
-    new_ct=$(printf '%s' "$body" | cut -d '&' -f 6); new_ct=${new_ct#custom_ct=}
-    new_cu=$(printf '%s' "$body" | cut -d '&' -f 7); new_cu=${new_cu#custom_cu=}
-    new_cm=$(printf '%s' "$body" | cut -d '&' -f 8); new_cm=${new_cm#custom_cm=}
-    new_bd=$(printf '%s' "$body" | cut -d '&' -f 9); new_bd=${new_bd#custom_bd=}
-    case "$new_collect" in 0|1|2|5|10) ;; *) return 1 ;; esac
-    case "$new_report" in 30|60|120|180) ;; *) return 1 ;; esac
-    case "$new_ping" in http|tcp) ;; *) return 1 ;; esac
-    case "$new_reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) return 1 ;; esac
-    [ "$new_schema" = "1" ] || return 1
-    [ "$new_report" -ge "$new_collect" ] || return 1
     new_rx_corr=""
     new_tx_corr=""
-    local field_count
-    field_count=$(printf '%s' "$body" | awk -F'&' '{print NF}')
-    if [ "$field_count" -ge 11 ]; then
-        local f10 f11
-        f10=$(printf '%s' "$body" | cut -d '&' -f 10)
-        f11=$(printf '%s' "$body" | cut -d '&' -f 11)
-        case "$f10" in rx_correction=*) new_rx_corr="${f10#rx_correction=}" ;; esac
-        case "$f11" in tx_correction=*) new_tx_corr="${f11#tx_correction=}" ;; esac
-    fi
+    IFS='&' read -ra _fields <<< "$body"
+    for _f in "${_fields[@]}"; do
+        _k="${_f%%=*}"; _v="${_f#*=}"
+        case "$_k" in
+            collect_interval) new_collect="$_v" ;;
+            report_interval)  new_report="$_v" ;;
+            reset_day)        new_reset="$_v" ;;
+            schema_version)   new_schema="$_v" ;;
+            custom_ct)        new_ct="$_v" ;;
+            custom_cu)        new_cu="$_v" ;;
+            custom_cm)        new_cm="$_v" ;;
+            custom_bd)        new_bd="$_v" ;;
+            rx_correction)    new_rx_corr="$_v" ;;
+            tx_correction)    new_tx_corr="$_v" ;;
+        esac
+    done
+
+    case "$new_collect" in 0|1|2|5|10) ;; *) return 1 ;; esac
+    case "$new_report" in 30|60|120|180) ;; *) return 1 ;; esac
+    case "$new_reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) return 1 ;; esac
+    [ "$new_schema" = "2" ] || return 1
+    [ "$new_report" -ge "$new_collect" ] || return 1
     if [ "$new_md5" != "${CONFIG_MD5:-none}" ]; then
-        persist_dynamic_config "$new_collect" "$new_report" "$new_ping" "$new_reset" "$new_md5" "$new_ct" "$new_cu" "$new_cm" "$new_bd" || return 1
+        persist_dynamic_config "$new_collect" "$new_report" "$new_reset" "$new_md5" "$new_ct" "$new_cu" "$new_cm" "$new_bd" || return 1
         COLLECT_INTERVAL="$new_collect"
         REPORT_INTERVAL="$new_report"
-        PING_TYPE="$new_ping"
         RESET_DAY="$new_reset"
         CT_NODE="$new_ct"
         CU_NODE="$new_cu"
@@ -275,7 +292,7 @@ apply_remote_config() {
             kill "$WORKER_PID" 2>/dev/null || true
             wait "$WORKER_PID" 2>/dev/null || true
         fi
-        rm -f "${TEMP_DIR}/.cf_ping_"* "${TEMP_DIR}/.cf_loss_"* 2>/dev/null || true
+        rm -f "${TEMP_DIR}/.cf_probe_"* 2>/dev/null || true
         run_network_worker &
         WORKER_PID=$!
 
@@ -351,7 +368,7 @@ apply_traffic_correction() {
     saved_tx_period=${tx_bytes}
     log_info "Traffic correction applied: RX=${rx_val}GB (${rx_bytes} bytes) TX=${tx_val}GB (${tx_bytes} bytes)"
     mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
-    cat > "${TRAFFIC_DATA_FILE}" << EOF
+    cat > "${TRAFFIC_DATA_FILE}.tmp" << EOF
 RX_PREV=${saved_rx_prev}
 TX_PREV=${saved_tx_prev}
 RX_PERIOD=${saved_rx_period}
@@ -359,6 +376,7 @@ TX_PERIOD=${saved_tx_period}
 LAST_CHECK=${now_ts}
 PERIOD_START=${saved_period_start}
 EOF
+    mv "${TRAFFIC_DATA_FILE}.tmp" "${TRAFFIC_DATA_FILE}" 2>/dev/null || true
 }
 
 escape_json() {
@@ -404,14 +422,21 @@ get_period_start_ts() {
     [ "${reset_day}" -eq 0 ] 2>/dev/null && { echo "0"; return; }
     local now_ts="${2:-0}"
     local year month day
-    year=$(date -u -r "${now_ts}" '+%Y' 2>/dev/null)
-    month=$(date -u -r "${now_ts}" '+%m' 2>/dev/null)
-    day=$(date -u -r "${now_ts}" '+%d' 2>/dev/null)
-    
+    year=$(date -u -r "${now_ts}" '+%Y' 2>/dev/null || echo "")
+    month=$(date -u -r "${now_ts}" '+%m' 2>/dev/null || echo "")
+    day=$(date -u -r "${now_ts}" '+%d' 2>/dev/null || echo "")
+
+    # date 失败时回退为当前时间
+    if [ -z "$year" ] || [ -z "$month" ] || [ -z "$day" ]; then
+        year=$(date -u '+%Y' 2>/dev/null || echo "1970")
+        month=$(date -u '+%m' 2>/dev/null || echo "01")
+        day=$(date -u '+%d' 2>/dev/null || echo "01")
+    fi
+
     local target_day="${reset_day}"
-    case "${month:-}" in
-        02) 
-            if is_leap_year "${year:-0}"; then
+    case "${month}" in
+        02)
+            if is_leap_year "${year}"; then
                 [ "${target_day}" -gt 29 ] && target_day=29
             else
                 [ "${target_day}" -gt 28 ] && target_day=28
@@ -419,17 +444,17 @@ get_period_start_ts() {
             ;;
         04|06|09|11) [ "${target_day}" -gt 30 ] && target_day=30 ;;
     esac
-    
+
     local period_start_ts
-    if [ "${day:-0}" -ge "${target_day}" ]; then
-        period_start_ts=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${year:-0}-${month:-01}-${target_day} 00:00:00" '+%s' 2>/dev/null || echo "${now_ts}")
+    if [ "${day}" -ge "${target_day}" ]; then
+        period_start_ts=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${year}-${month}-${target_day} 00:00:00" '+%s' 2>/dev/null || echo "${now_ts}")
     else
         local prev_month=$((month - 1))
         [ "${prev_month}" -eq 0 ] && { prev_month=12; year=$((year - 1)); }
         local prev_month_str=$(printf "%02d" "${prev_month}")
         case "${prev_month}" in
-            02) 
-                if is_leap_year "${year:-0}"; then
+            02)
+                if is_leap_year "${year}"; then
                     [ "${target_day}" -gt 29 ] && target_day=29
                 else
                     [ "${target_day}" -gt 28 ] && target_day=28
@@ -437,7 +462,7 @@ get_period_start_ts() {
                 ;;
             04|06|09|11) [ "${target_day}" -gt 30 ] && target_day=30 ;;
         esac
-        period_start_ts=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${year:-0}-${prev_month_str}-${target_day} 00:00:00" '+%s' 2>/dev/null || echo "${now_ts}")
+        period_start_ts=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${year}-${prev_month_str}-${target_day} 00:00:00" '+%s' 2>/dev/null || echo "${now_ts}")
     fi
     echo "${period_start_ts}"
 }
@@ -506,12 +531,41 @@ EOF
 }
 
 get_cpu_stat() {
-    top -l 2 -n 0 2>/dev/null | grep "CPU usage" | tail -1 | awk '{
-        split($3, user, "%");
-        split($5, sys, "%");
-        total = user[1] + sys[1];
-        printf "%.2f\n", total
-    }' || echo "0.00"
+    local cpu_ticks
+    cpu_ticks=$(sysctl -n kern.cp_time 2>/dev/null || echo "")
+    if [ -n "$cpu_ticks" ]; then
+        local user nice sys intr idle total
+        user=$(echo "$cpu_ticks" | awk '{print $1}')
+        nice=$(echo "$cpu_ticks" | awk '{print $2}')
+        sys=$(echo "$cpu_ticks" | awk '{print $3}')
+        intr=$(echo "$cpu_ticks" | awk '{print $4}')
+        idle=$(echo "$cpu_ticks" | awk '{print $5}')
+        total=$((user + nice + sys + intr + idle))
+        local prev_file="/tmp/cf-probe/.cf_cpu_prev"
+        local prev_total=0 prev_idle=0
+        if [ -f "$prev_file" ]; then
+            local prev=$(cat "$prev_file" 2>/dev/null || echo "0 0")
+            prev_total=${prev%% *}
+            prev_idle=${prev##* }
+        fi
+        mkdir -p /tmp/cf-probe 2>/dev/null || true
+        echo "$total $idle" > "${prev_file}.tmp" && mv "${prev_file}.tmp" "$prev_file" 2>/dev/null || true
+        local diff_total=$((total - prev_total))
+        local diff_idle=$((idle - prev_idle))
+        if [ "$diff_total" -gt 0 ]; then
+            local usage=$(( (diff_total - diff_idle) * 100 / diff_total ))
+            printf "%.2f\n" "$usage"
+        else
+            echo "0.00"
+        fi
+    else
+        top -l 1 -n 0 2>/dev/null | grep "CPU usage" | tail -1 | awk '{
+            split($3, user, "%");
+            split($5, sys, "%");
+            total = user[1] + sys[1];
+            printf "%.2f\n", total
+        }' || echo "0.00"
+    fi
 }
 
 get_memory_stats() {
@@ -670,28 +724,19 @@ json_string_or_null() {
     fi
 }
 
-get_http_ping() { 
-    local rtt
-    rtt=$(curl -I -o /dev/null -s -m 3 --connect-timeout 2 -w "%{time_total}" "http://${1:-}" 2>/dev/null | awk '{printf "%.0f", $1*1000}')
-    if [ -n "${rtt:-}" ] && [ "${rtt}" -gt 0 ] 2>/dev/null; then
-        echo "${rtt}"
-    else
-        echo ""
-    fi
-}
-
 get_time_ms() {
     local ts
     ts=$(date +%s%3N 2>/dev/null || true)
     case "${ts}" in
         ''|*[!0-9]*) ;;
-        ?????????????*) echo "${ts}"; return 0 ;;
+        ?????????????) echo "${ts}"; return 0 ;;
+        ??????????????*) echo "${ts:0:13}"; return 0 ;;
     esac
 
     ts=$(date +%s%N 2>/dev/null || true)
     case "${ts}" in
         ''|*[!0-9]*) ;;
-        ????????????????*) echo "${ts%??????}"; return 0 ;;
+        ???????????????????) echo "${ts:0:13}"; return 0 ;;
     esac
 
     if command -v perl >/dev/null 2>&1; then
@@ -722,121 +767,42 @@ get_tcp_ping_nc() {
     return 1
 }
 
-parse_curl_connect_ms() {
-    local timing="${1:-}"
-    awk -v t="${timing}" 'BEGIN{
-        split(t, a, " ")
-        dns = a[1] + 0
-        conn = a[2] + 0
-        if (conn <= 0 || conn < dns) {
-            print ""
-            exit
-        }
-        ms = int((conn - dns) * 1000 + 0.5)
-        if (ms < 1) ms = 1
-        print ms
-    }'
-}
-
-get_tcp_ping_curl_tcp() {
+get_probe() {
     local host="${1:-}"
-    local port="${2:-443}"
-    local timing
+    local count="${2:-4}"
+    local port="${3:-443}"
 
-    if [ -z "${host}" ]; then
-        echo ""
-        return
-    fi
-
-    timing=$(curl -o /dev/null -s \
-        --connect-timeout 2 \
-        --max-time 2 \
-        -w "%{time_namelookup} %{time_connect}" \
-        "telnet://${host}:${port}" < /dev/null 2>/dev/null || true)
-
-    parse_curl_connect_ms "${timing:-}"
-}
-
-get_tcp_ping_curl_http_fallback() {
-    local host="${1:-}"
-    local port="${2:-443}"
-    local scheme="http"
-    local timing
-
-    [ -z "${host}" ] && { echo ""; return; }
-    [ "${port}" = "443" ] && scheme="https"
-
-    timing=$(curl -I -k -o /dev/null -s \
-        --connect-timeout 2 \
-        --max-time 3 \
-        -w "%{time_namelookup} %{time_connect}" \
-        "${scheme}://${host}:${port}/" 2>/dev/null || true)
-
-    parse_curl_connect_ms "${timing:-}"
-}
-
-get_tcp_ping() {
-    local host="${1:-}"
-    local port="${2:-443}"
-    local rtt
-
-    if [ -z "${host}" ]; then
-        echo ""
+    if [ -z "$host" ]; then
+        echo "null 100"
         return
     fi
 
     if has_nc_zero_io && get_time_ms >/dev/null 2>&1; then
-        get_tcp_ping_nc "${host}" "${port}" || echo ""
-        return
-    fi
-
-    rtt=$(get_tcp_ping_curl_tcp "${host}" "${port}")
-    if [ -n "${rtt}" ]; then
-        echo "${rtt}"
-        return
-    fi
-
-    get_tcp_ping_curl_http_fallback "${host}" "${port}"
-}
-
-get_ping() {
-    local host="${1:-}"
-    local port="${2:-443}"
-    
-    if [ "${PING_TYPE:-http}" = "tcp" ]; then
-        get_tcp_ping "${host}" "${port}"
-    else
-        get_http_ping "${host}"
-    fi
-}
-
-get_packet_loss() {
-    local host="${1:-}"
-    local count="${2:-4}"
-
-    if [ -z "${host}" ]; then
-        echo ""
-        return
-    fi
-
-    # 优先使用 ICMP ping 测量真实丢包率
-    if command -v ping >/dev/null 2>&1; then
-        local received
-        received=$(ping -c "$count" -W 2 "$host" 2>/dev/null | grep -c "icmp_seq")
-        echo $(( (count - received) * 100 / count ))
-        return
-    fi
-
-    # fallback: HTTP/TCP 连通性检测
-    local ok=0
-    local i=1
-    while [ "${i}" -le "${count}" ]; do
-        if get_ping "${host}" 2>/dev/null | grep -qE '^[0-9]+$'; then
-            ok=$((ok + 1))
+        local ok=0 total_rtt=0 i=1 rtt
+        while [ "$i" -le "$count" ]; do
+            rtt=$(get_tcp_ping_nc "$host" "$port" 2>/dev/null)
+            if [ -n "$rtt" ]; then
+                ok=$((ok + 1))
+                total_rtt=$((total_rtt + rtt))
+            fi
+            i=$((i + 1))
+        done
+        if [ "$ok" -gt 0 ]; then
+            echo "$((total_rtt / ok)) $(( (count - ok) * 100 / count ))"
+        else
+            echo "null 100"
         fi
-        i=$((i + 1))
-    done
-    echo $(( (count - ok) * 100 / count ))
+        return
+    fi
+
+    local icmp_out
+    icmp_out=$(ping -c "$count" -W 2000 "$host" 2>/dev/null)
+    local avg_rtt loss
+    avg_rtt=$(echo "$icmp_out" | awk -F'[/ ]' '/^rtt/{print $8}' | cut -d. -f1)
+    loss=$(echo "$icmp_out" | awk '/packet loss/{for(i=1;i<=NF;i++) if($i~/[0-9]+%/){gsub(/%/,"",$i);printf "%d",$i;exit}}')
+    [ -z "$avg_rtt" ] && avg_rtt="null"
+    [ -z "$loss" ] && loss=100
+    echo "$avg_rtt $loss"
 }
 
 CT_NODE="${CT_NODE:-}"
@@ -849,41 +815,39 @@ write_probe_result() {
     shift
     local tmp="${dest}.tmp"
     rm -f "${tmp}"
-    if "$@" > "${tmp}" 2>/dev/null && [ -f "${tmp}" ]; then
+    "$@" > "${tmp}" 2>/dev/null || true
+    if [ -s "${tmp}" ]; then
         mv "${tmp}" "${dest}"
     else
         rm -f "${tmp}" "${dest}"
     fi
 }
 
-refresh_latency_async() {
-    [ -n "${CT_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_ping_ct" get_ping "${CT_NODE}" &
-    [ -n "${CU_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_ping_cu" get_ping "${CU_NODE}" &
-    [ -n "${CM_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_ping_cm" get_ping "${CM_NODE}" &
-    [ -n "${BD_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_ping_bd" get_ping "${BD_NODE}" &
-    [ -n "${CT_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_loss_ct" get_packet_loss "${CT_NODE}" &
-    [ -n "${CU_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_loss_cu" get_packet_loss "${CU_NODE}" &
-    [ -n "${CM_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_loss_cm" get_packet_loss "${CM_NODE}" &
-    [ -n "${BD_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_loss_bd" get_packet_loss "${BD_NODE}" &
+refresh_probe_async() {
+    [ -n "${CT_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_probe_ct" get_probe "${CT_NODE}" 4 443 &
+    [ -n "${CU_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_probe_cu" get_probe "${CU_NODE}" 4 443 &
+    [ -n "${CM_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_probe_cm" get_probe "${CM_NODE}" 4 443 &
+    [ -n "${BD_NODE:-}" ] && write_probe_result "${TEMP_DIR}/.cf_probe_bd" get_probe "${BD_NODE}" 4 443 &
+    wait
 }
 
 run_network_worker() {
     set -u
     local last_ip=0
-    local last_ping=0
-    
+    local last_probe=0
+
     while true; do
         local now; now=$(date +%s)
-        
+
         if [ $((now - last_ip)) -ge 600 ] || [ "${last_ip}" -eq 0 ]; then
             (curl -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > "${TEMP_DIR}/.cf_ipv4.tmp" && mv "${TEMP_DIR}/.cf_ipv4.tmp" "${TEMP_DIR}/.cf_ipv4" || true
             (if route -n get -inet6 default >/dev/null 2>&1; then curl -6 -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0"; else echo "0"; fi) > "${TEMP_DIR}/.cf_ipv6.tmp" && mv "${TEMP_DIR}/.cf_ipv6.tmp" "${TEMP_DIR}/.cf_ipv6" || true
             last_ip="${now}"
         fi
-        
-        if [ $((now - last_ping)) -ge 30 ] || [ "${last_ping}" -eq 0 ]; then
-            refresh_latency_async
-            last_ping="${now}"
+
+        if [ $((now - last_probe)) -ge 30 ] || [ "${last_probe}" -eq 0 ]; then
+            refresh_probe_async
+            last_probe="${now}"
         fi
         sleep 5
     done
@@ -938,7 +902,8 @@ LAST_REPORT_TIME=0
 
 while true; do
     LOOP_START_TIME=$(date +%s)
-    
+    rotate_log_if_needed "$PROBE_LOG_FILE"
+
     if ! kill -0 "${WORKER_PID}" 2>/dev/null; then
         run_network_worker &
         WORKER_PID=$!
@@ -1000,7 +965,7 @@ while true; do
     LOAD_AVG=""
     loadavg_raw=$(sysctl vm.loadavg 2>/dev/null || echo "")
     if [ -n "${loadavg_raw:-}" ]; then
-        LOAD_AVG=$(echo "${loadavg_raw}" | sed 's/[{}]//g' | awk '{print $3, $4, $5}')
+        LOAD_AVG=$(echo "${loadavg_raw}" | sed 's/[{}]//g' | awk '{print $1, $2, $3}')
     fi
     LOAD_AVG=${LOAD_AVG:-"0 0 0"}
     
@@ -1042,32 +1007,18 @@ while true; do
 
     [ -f "${TEMP_DIR}/.cf_ipv4" ] && IPV4=$(cat "${TEMP_DIR}/.cf_ipv4") || IPV4="0"
     [ -f "${TEMP_DIR}/.cf_ipv6" ] && IPV6=$(cat "${TEMP_DIR}/.cf_ipv6") || IPV6="0"
-    [ -f "${TEMP_DIR}/.cf_ping_ct" ] && PING_CT=$(cat "${TEMP_DIR}/.cf_ping_ct") || PING_CT=""
-    [ -f "${TEMP_DIR}/.cf_ping_cu" ] && PING_CU=$(cat "${TEMP_DIR}/.cf_ping_cu") || PING_CU=""
-    [ -f "${TEMP_DIR}/.cf_ping_cm" ] && PING_CM=$(cat "${TEMP_DIR}/.cf_ping_cm") || PING_CM=""
-    [ -f "${TEMP_DIR}/.cf_ping_bd" ] && PING_BD=$(cat "${TEMP_DIR}/.cf_ping_bd") || PING_BD=""
-    [ -f "${TEMP_DIR}/.cf_loss_ct" ] && LOSS_CT=$(cat "${TEMP_DIR}/.cf_loss_ct") || LOSS_CT=""
-    [ -f "${TEMP_DIR}/.cf_loss_cu" ] && LOSS_CU=$(cat "${TEMP_DIR}/.cf_loss_cu") || LOSS_CU=""
-    [ -f "${TEMP_DIR}/.cf_loss_cm" ] && LOSS_CM=$(cat "${TEMP_DIR}/.cf_loss_cm") || LOSS_CM=""
-    [ -f "${TEMP_DIR}/.cf_loss_bd" ] && LOSS_BD=$(cat "${TEMP_DIR}/.cf_loss_bd") || LOSS_BD=""
+    if [ -f "${TEMP_DIR}/.cf_probe_ct" ]; then _p=$(cat "${TEMP_DIR}/.cf_probe_ct"); PING_CT=${_p%% *}; LOSS_CT=${_p##* }; else PING_CT=""; LOSS_CT=""; fi
+    if [ -f "${TEMP_DIR}/.cf_probe_cu" ]; then _p=$(cat "${TEMP_DIR}/.cf_probe_cu"); PING_CU=${_p%% *}; LOSS_CU=${_p##* }; else PING_CU=""; LOSS_CU=""; fi
+    if [ -f "${TEMP_DIR}/.cf_probe_cm" ]; then _p=$(cat "${TEMP_DIR}/.cf_probe_cm"); PING_CM=${_p%% *}; LOSS_CM=${_p##* }; else PING_CM=""; LOSS_CM=""; fi
+    if [ -f "${TEMP_DIR}/.cf_probe_bd" ]; then _p=$(cat "${TEMP_DIR}/.cf_probe_bd"); PING_BD=${_p%% *}; LOSS_BD=${_p##* }; else PING_BD=""; LOSS_BD=""; fi
 
     EOS=$(escape_json "${OS}")
     EARCH=$(escape_json "${ARCH}")
     ECPU=$(escape_json "${CPU_INFO}")
     ELOAD=$(escape_json "${LOAD_AVG}")
     
-    EPING_CT=$(escape_json "${PING_CT}")
-    EPING_CU=$(escape_json "${PING_CU}")
-    EPING_CM=$(escape_json "${PING_CM}")
-    EPING_BD=$(escape_json "${PING_BD}")
-    
-    ELOSS_CT=$(escape_json "${LOSS_CT}")
-    ELOSS_CU=$(escape_json "${LOSS_CU}")
-    ELOSS_CM=$(escape_json "${LOSS_CM}")
-    ELOSS_BD=$(escape_json "${LOSS_BD}")
-
     METRICS_JSON=$(cat <<EOF
-{"cpu":"${CPU}","ram_total":"${RAM_TOTAL}","ram_used":"${RAM_USED}","swap_total":"${SWAP_TOTAL}","swap_used":"${SWAP_USED}","disk_total":"${DISK_TOTAL}","disk_used":"${DISK_USED}","load_avg":"${ELOAD}","boot_time":"${BOOT_TIME}","net_rx":"${RX_NOW}","net_tx":"${TX_NOW}","net_rx_monthly":"${RX_MONTHLY}","net_tx_monthly":"${TX_MONTHLY}","net_in_speed":"${RX_SPEED}","net_out_speed":"${TX_SPEED}","os":"${EOS}","arch":"${EARCH}","cpu_info":"${ECPU}","cpu_cores":"${CPU_CORES}","gpu":${GPU},"gpu_info":${GPU_INFO_VALUE},"processes":"${PROCESSES}","tcp_conn":"${TCP_CONN}","udp_conn":"${UDP_CONN}","ip_v4":"${IPV4}","ip_v6":"${IPV6}","ping_ct":"${EPING_CT}","ping_cu":"${EPING_CU}","ping_cm":"${EPING_CM}","ping_bd":"${EPING_BD}","loss_ct":"${ELOSS_CT}","loss_cu":"${ELOSS_CU}","loss_cm":"${ELOSS_CM}","loss_bd":"${ELOSS_BD}"}
+{"cpu":"${CPU}","ram_total":"${RAM_TOTAL}","ram_used":"${RAM_USED}","swap_total":"${SWAP_TOTAL}","swap_used":"${SWAP_USED}","disk_total":"${DISK_TOTAL}","disk_used":"${DISK_USED}","load_avg":"${ELOAD}","boot_time":"${BOOT_TIME}","net_rx":"${RX_NOW}","net_tx":"${TX_NOW}","net_rx_monthly":"${RX_MONTHLY}","net_tx_monthly":"${TX_MONTHLY}","net_in_speed":"${RX_SPEED}","net_out_speed":"${TX_SPEED}","os":"${EOS}","arch":"${EARCH}","cpu_info":"${ECPU}","cpu_cores":"${CPU_CORES}","gpu":${GPU},"gpu_info":${GPU_INFO_VALUE},"processes":"${PROCESSES}","tcp_conn":"${TCP_CONN}","udp_conn":"${UDP_CONN}","ip_v4":"${IPV4}","ip_v6":"${IPV6}","ping_ct":"${PING_CT}","ping_cu":"${PING_CU}","ping_cm":"${PING_CM}","ping_bd":"${PING_BD}","loss_ct":"${LOSS_CT}","loss_cu":"${LOSS_CU}","loss_cm":"${LOSS_CM}","loss_bd":"${LOSS_BD}"}
 EOF
 )
     if [ "${COLLECT_INTERVAL}" -gt 0 ]; then
@@ -1097,7 +1048,7 @@ EOF
         REPORT_HEADER_FILE="${TEMP_DIR}/.cf_probe_headers.$$"
         REPORT_HTTP_CODE=$(curl -skS -D "$REPORT_HEADER_FILE" -o "$REPORT_RESPONSE_FILE" -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
-            -H "X-Agent-Config-Schema: 1" \
+            -H "X-Agent-Config-Schema: 2" \
             -H "X-Agent-Config-Md5: ${CONFIG_MD5:-none}" \
             -d "${PAYLOAD}" -m 8 --connect-timeout 3 "${WORKER_URL}" 2>/dev/null || echo 000)
         case "$REPORT_HTTP_CODE" in ''|*[!0-9]*) REPORT_HTTP_CODE=000 ;; esac
@@ -1110,11 +1061,7 @@ EOF
         LAST_REPORT_TIME="${LOOP_START_TIME}"
     fi
     
-    LOOP_END_TIME=$(date +%s)
-    EXEC_DURATION=$((LOOP_END_TIME - LOOP_START_TIME))
-    SLEEP_TIME=$((ACTIVE_INTERVAL - EXEC_DURATION))
-    [ "${SLEEP_TIME}" -le 0 ] && SLEEP_TIME=1
-    sleep "${SLEEP_TIME}"
+    sleep "${ACTIVE_INTERVAL}"
 done
 PROBE_EOF
 
@@ -1236,7 +1183,6 @@ install_probe() {
     WORKER_URL=""
     COLLECT_INTERVAL=""
     REPORT_INTERVAL=""
-    PING_TYPE=""
     CT_NODE=""
     CU_NODE=""
     CM_NODE=""
@@ -1252,7 +1198,6 @@ install_probe() {
             -url=*) WORKER_URL="${arg#-url=}" ;;
             -collect_interval=*|-collect=*) COLLECT_INTERVAL="${arg#*=}" ;;
             -interval=*) REPORT_INTERVAL="${arg#-interval=}" ;;
-            -ping=*) PING_TYPE="${arg#-ping=}" ;;
             -ct=*) CT_NODE="${arg#-ct=}" ;;
             -cu=*) CU_NODE="${arg#-cu=}" ;;
             -cm=*) CM_NODE="${arg#-cm=}" ;;
@@ -1271,13 +1216,12 @@ install_probe() {
 
     if [ -f "${CONFIG_FILE}" ]; then
         step "检测到已有配置文件，执行二次安装..."
-        
+
         if [ -n "${SERVER_ID}" ] && [ -n "${SECRET}" ] && [ -n "${WORKER_URL}" ]; then
             COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
             REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-            PING_TYPE=${PING_TYPE:-http}
             [ -z "${RESET_DAY}" ] && RESET_DAY=1
-            
+
             step "更新配置文件..."
             cat > "${CONFIG_FILE}" << EOF
 SERVER_ID="${SERVER_ID}"
@@ -1285,7 +1229,6 @@ SECRET="${SECRET}"
 WORKER_URL="${WORKER_URL}"
 COLLECT_INTERVAL="${COLLECT_INTERVAL}"
 REPORT_INTERVAL="${REPORT_INTERVAL}"
-PING_TYPE="${PING_TYPE}"
 CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
@@ -1305,7 +1248,6 @@ EOF
                     WORKER_URL) WORKER_URL="${value%\"}"; WORKER_URL="${WORKER_URL#\"}" ;;
                     COLLECT_INTERVAL) COLLECT_INTERVAL="${value%\"}"; COLLECT_INTERVAL="${COLLECT_INTERVAL#\"}" ;;
                     REPORT_INTERVAL) REPORT_INTERVAL="${value%\"}"; REPORT_INTERVAL="${REPORT_INTERVAL#\"}" ;;
-                    PING_TYPE) PING_TYPE="${value%\"}"; PING_TYPE="${PING_TYPE#\"}" ;;
                     CT_NODE) CT_NODE="${value%\"}"; CT_NODE="${CT_NODE#\"}" ;;
                     CU_NODE) CU_NODE="${value%\"}"; CU_NODE="${CU_NODE#\"}" ;;
                     CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
@@ -1321,7 +1263,6 @@ EOF
 
         COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
         REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-        PING_TYPE=${PING_TYPE:-http}
         [ -z "${RESET_DAY}" ] && RESET_DAY=1
 
         step "创建配置目录..."
@@ -1341,7 +1282,6 @@ SECRET="${SECRET}"
 WORKER_URL="${WORKER_URL}"
 COLLECT_INTERVAL="${COLLECT_INTERVAL}"
 REPORT_INTERVAL="${REPORT_INTERVAL}"
-PING_TYPE="${PING_TYPE}"
 CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
@@ -1403,7 +1343,6 @@ EOF
     echo -e "    ● Worker URL  : ${WORKER_URL}"
     echo -e "    ● 上报间隔    : ${REPORT_INTERVAL}秒"
     printf  '    ● 采样间隔    : %s秒\n' "${COLLECT_INTERVAL}"
-    echo -e "    ● 探测类型    : ${PING_TYPE}"
     [ -n "${RX_CORRECTION}" ] && echo -e "    ● 下行校正    : ${RX_CORRECTION}GB"
     [ -n "${TX_CORRECTION}" ] && echo -e "    ● 上行校正    : ${TX_CORRECTION}GB"
     if [ "${RESET_DAY}" = "0" ]; then

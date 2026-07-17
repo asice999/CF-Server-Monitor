@@ -12,11 +12,10 @@ import { md5Hash } from '../src/utils/common.js';
 
 const server = {
   collect_interval: 1,
-  ping_mode: 'tcp',
   report_interval: 60,
   reset_day: 15
 };
-const expected = 'collect_interval=1&ping_mode=tcp&report_interval=60&reset_day=15&schema_version=1&custom_ct=&custom_cu=&custom_cm=&custom_bd=';
+const expected = 'collect_interval=1&report_interval=60&reset_day=15&schema_version=2&custom_ct=&custom_cu=&custom_cm=&custom_bd=';
 
 const config = buildAgentConfig(server);
 assert.equal(serializeAgentConfig(config), expected);
@@ -46,24 +45,21 @@ for (const value of ['', 'abc', '中文', 'a'.repeat(1000)]) {
 
 assert.equal(validateAgentConfigInput(server).valid, true);
 assert.equal(validateAgentConfigInput({ ...server, collect_interval: '1' }).valid, false);
-assert.equal(validateAgentConfigInput({ ...server, ping_mode: 'http;reboot' }).valid, false);
 assert.equal(validateAgentConfigInput({ ...server, reset_day: 32 }).valid, false);
 assert.deepEqual(buildAgentConfig({}), {
   collect_interval: 0,
-  ping_mode: 'http',
   report_interval: 60,
   reset_day: 1,
   custom_ct: '',
   custom_cu: '',
   custom_cm: '',
   custom_bd: '',
-  schema_version: 1
+  schema_version: 2
 });
 
 // Test server-level ping node priority
 const serverWithCustomPing = {
   collect_interval: 0,
-  ping_mode: 'http',
   report_interval: 60,
   reset_day: 1,
   custom_ct: 'ct-server.example.com',

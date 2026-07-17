@@ -228,42 +228,6 @@ https://你的项目名.你的子域.workers.dev/#/admin
 3. 点击 **+ 添加服务器**
 4. 点击新服务器旁的 **📋** 按钮复制安装命令
 
-### Linux系统
-
-Ubuntu / Debian / CentOS / RHEL / Fedora / Rocky / AlmaLinux 系统
-
-```bash
-curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-collect_interval=0] [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
-```
-
-Alpine 系统
-
-```bash
-curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-collect_interval=0] [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
-```
-
-OpenWrt / LEDE / ImmortalWrt 系统
-
-```bash
-curl -sL https://你的项目.你的子域.workers.dev/install-openwrt.sh | sh -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-collect_interval=0] [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
-```
-
-### macOS 系统安装
-
-支持 macOS Intel 和 Apple Silicon（M1/M2/M3/M4），使用 `sudo` 执行安装脚本：
-
-```bash
-curl -sL https://你的项目.你的子域.workers.dev/install-mac.sh | sudo bash -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-collect_interval=0] [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
-```
-
-### Windows 系统安装
-
-```powershell
-irm https://你的项目.你的子域.workers.dev/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1; powershell -ExecutionPolicy Bypass -File .\cf-server-monitor.ps1 install -Id <SERVER_ID> -Secret <SECRET> -Url <WORKER_URL> [-ReportInterval=60] [-PingType=tcp] [-CtNode=xxx] [-CuNode=xxx] [-CmNode=xxx] [-BdNode=xxx] [-ResetDay=1]
-```
-
-***
-
 ### 参数说明
 
 | 参数                  | 说明                           | 默认值    |

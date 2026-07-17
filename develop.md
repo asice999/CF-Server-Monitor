@@ -338,7 +338,7 @@ WebSocket 收到 `batchUpdate` 消息后，数据**不是立即应用**，而是
 | OpenWrt | `install-openwrt.sh` | sh |
 | Windows | `cf-server-monitor.ps1` | PowerShell |
 
-参数：`-id=<serverId> -secret='<secret>' -url=<HOST>/update -collect_interval=N -interval=N -ping=<http|tcp> -reset_day=N -ct=<node> -cu=<node> -cm=<node> -bd=<node> -rx_correction=N -tx_correction=N`
+参数：`-id=<serverId> -secret='<secret>' -url=<HOST>/update -collect_interval=N -interval=N -reset_day=N -ct=<node> -cu=<node> -cm=<node> -bd=<node> -rx_correction=N -tx_correction=N`
 
 #### 系统设置（Settings Tab）
 

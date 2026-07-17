@@ -84,13 +84,6 @@
             <option :value="180">180</option>
           </select>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.pingMode }}</label>
-          <select v-model="editForm.ping_mode" class="form-select">
-            <option value="http">HTTP</option>
-            <option value="tcp">TCP</option>
-          </select>
-        </div>
       </div>
 
       <div class="text-muted text-sm mb-3">
