@@ -119,6 +119,61 @@ body::before {
     text-decoration: underline;
 }
 
+.footer-version {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    position: relative;
+    outline: none;
+}
+
+.version-update-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent-red);
+    box-shadow: 0 0 8px rgba(248, 81, 73, 0.5);
+    animation: version-update-blink 2s ease-in-out infinite;
+    cursor: help;
+}
+
+.version-update-tooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 20;
+    padding: 5px 8px;
+    border: 1px solid var(--border-active);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: nowrap;
+    opacity: 0;
+    transform: translateY(2px);
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.footer-version:hover .version-update-tooltip,
+.footer-version:focus .version-update-tooltip {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+@keyframes version-update-blink {
+    0%, 100% {
+        opacity: 0.45;
+        transform: scale(0.9);
+    }
+    50% {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
 /* --------------------------------------------------------------------------
    5. Terminal Header Component
    -------------------------------------------------------------------------- */
@@ -1420,6 +1475,19 @@ body::before {
     box-shadow: 0 0 0 2px rgba(57, 210, 192, 0.1);
 }
 
+.form-input.input-invalid,
+.form-select.input-invalid,
+.form-textarea.input-invalid {
+    border-color: var(--accent-red);
+}
+
+.form-input.input-invalid:focus,
+.form-select.input-invalid:focus,
+.form-textarea.input-invalid:focus {
+    border-color: var(--accent-red);
+    box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.12);
+}
+
 .form-input::placeholder,
 .form-textarea::placeholder {
     color: var(--text-muted);
@@ -1508,13 +1576,21 @@ body::before {
     background: var(--bg-secondary);
     border: 1px solid var(--border-active);
     border-radius: 6px;
-    width: 480px;
+    width: 680px;
     max-width: 90%;
     max-height: 90vh;
     padding: 24px;
     position: relative;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     overflow-y: auto;
+}
+
+.auto-update-warning-modal {
+    z-index: 1010;
+}
+
+.auto-update-warning-modal .modal-dialog {
+    width: 560px;
 }
 
 .modal-header {
@@ -1869,6 +1945,98 @@ body::before {
 
 .cmd-input-wrapper.copied .cmd-input {
     color: var(--accent-green);
+}
+
+.cmd-output-wrapper {
+    display: none;
+    align-items: flex-start;
+    gap: 4px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    padding: 6px 10px;
+}
+
+.cmd-output {
+    flex: 1;
+    margin: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-family: var(--terminal-font);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.cmd-output-wrapper.copied {
+    border-color: var(--accent-green);
+    box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.15);
+}
+
+.cmd-output-wrapper.copied .cmd-prompt,
+.cmd-output-wrapper.copied .cmd-output {
+    color: var(--accent-green);
+}
+
+.config-list {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bg-card);
+}
+
+.config-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.config-row:last-child {
+    border-bottom: none;
+}
+
+.config-label {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.config-value {
+    color: var(--text-primary);
+    text-align: right;
+    word-break: break-word;
+    min-width: 0;
+    flex: 1;
+}
+
+.config-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.config-badge.is-enabled {
+    background: rgba(0, 212, 170, 0.12);
+    color: var(--accent-green);
+    border: 1px solid rgba(0, 212, 170, 0.2);
+}
+
+.config-badge.is-disabled {
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--accent-red);
+    border: 1px solid rgba(248, 81, 73, 0.2);
 }
 
 /* --------------------------------------------------------------------------
@@ -2364,6 +2532,27 @@ body::before {
     border-radius: 2px;
     filter: brightness(0.9);
     width: 24px;
+}
+
+.country-os-icons {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    vertical-align: middle;
+}
+
+.flag-fallback {
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
+}
+
+.os-icon-img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+    flex: 0 0 auto;
+    vertical-align: middle;
 }
 
 .admin-link-color {
@@ -2869,6 +3058,15 @@ body::before {
     .settings-section .flex[style*="gap"] .form-input,
     .settings-section .flex[style*="gap"] > * {
         width: 100%;
+    }
+
+    .config-row {
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .config-value {
+        text-align: left;
     }
 
     .tab-content .text-right {

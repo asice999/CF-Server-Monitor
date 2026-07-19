@@ -121,6 +121,7 @@ export async function addServerColumns(db) {
       reset_day: "INTEGER DEFAULT 1",
       collect_interval: "INTEGER DEFAULT 0",
       report_interval: "INTEGER DEFAULT 60",
+      auto_update: "TEXT DEFAULT '0'",
       custom_ct: "TEXT DEFAULT ''",
       custom_cu: "TEXT DEFAULT ''",
       custom_cm: "TEXT DEFAULT ''",
@@ -179,6 +180,7 @@ export async function addHistoryColumns(db) {
     const newHistoryCols = {
       cpu_cores: "INTEGER DEFAULT 0",
       cpu_info: "TEXT DEFAULT ''",
+      agent_version: "TEXT DEFAULT ''",
       gpu: "REAL DEFAULT NULL",
       gpu_info: "TEXT DEFAULT ''",
       arch: "TEXT DEFAULT ''",

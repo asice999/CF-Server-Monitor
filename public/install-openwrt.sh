@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# V1.2.0
+# V1.3.1
 # CF-Server-Monitor 安装/卸载脚本 (OpenWrt 专用版)
 # 支持: OpenWrt / LEDE / ImmortalWrt (procd + opkg)
 # 纯 POSIX sh 实现，无 bash 依赖
@@ -10,6 +10,8 @@
 # ==============================================================================
 
 set -eu
+
+AGENT_VERSION="1.3.1"
 
 # 路径定义（配置文件系统）
 CONFIG_DIR="/etc/config/cf-probe"
@@ -68,6 +70,7 @@ print_usage() {
     echo "  -cm=HOST       自定义CM测试节点"
     echo "  -bd=HOST       自定义BD测试节点"
     echo "  -reset_day=N   流量重置日(1-31, 0=不重置)，默认1"
+    echo "  -auto_update=0|1 自动更新探针，默认0"
     echo "  -rx_correction=N  下行流量校正(GB)，覆盖当月下行数据"
     echo "  -tx_correction=N  上行流量校正(GB)，覆盖当月上行数据"
     echo ""
@@ -81,6 +84,15 @@ print_usage() {
 
 sed_escape() {
     printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/&/\\&/g; s/@/\\@/g; s/\//\\\//g; s/|/\\|/g; s/"/\\"/g'
+}
+
+normalize_binary_value() {
+    local _cf_binary_value="${1-}" _cf_binary_default="${2-}"
+    [ -z "$_cf_binary_value" ] && _cf_binary_value="$_cf_binary_default"
+    case "$_cf_binary_value" in
+        0|1) printf '%s' "$_cf_binary_value" ;;
+        *) return 1 ;;
+    esac
 }
 
 to_uint() {
@@ -192,20 +204,20 @@ install_deps() {
             opkg install $optional_ping_pkg >/dev/null 2>&1 || true
             ;;
         *)
-            error "未知的包管理器: $PKG_MGR"
+            error "未知的包管理器: ${PKG_MGR}"
             ;;
     esac
 
     required_cmds="curl awk grep sed"
-    for cmd in $required_cmds; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            warn "缺少依赖: $cmd，某些功能可能不可用。"
+    for cmd in ${required_cmds}; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            warn "缺少依赖: ${cmd}，某些功能可能不可用。"
         fi
     done
 
     for cmd in pgrep pkill ss; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            warn "缺少可选依赖: $cmd（不影响核心监控功能）"
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            warn "缺少可选依赖: ${cmd}（不影响核心监控功能）"
         fi
     done
 
@@ -264,10 +276,11 @@ create_script() {
 
     mkdir -p /usr/local/bin 2>/dev/null || true
 
-    cat > "${SCRIPT_FILE}" << 'PROBE_EOF'
+    cat << 'PROBE_EOF' | sed "s|__AGENT_VERSION__|${AGENT_VERSION}|g" > "${SCRIPT_FILE}"
 #!/bin/sh
 set +eu
 
+AGENT_VERSION="__AGENT_VERSION__"
 PID_FILE="/var/run/cf-probe.pid"
 echo $$ > "$PID_FILE"
 
@@ -291,6 +304,7 @@ CU_NODE=""
 CM_NODE=""
 BD_NODE=""
 RESET_DAY=""
+AUTO_UPDATE=""
 CONFIG_MD5=""
 
 while IFS='=' read -r key value; do
@@ -305,6 +319,7 @@ while IFS='=' read -r key value; do
         CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
         BD_NODE) BD_NODE="${value%\"}"; BD_NODE="${BD_NODE#\"}" ;;
         RESET_DAY) RESET_DAY="${value%\"}"; RESET_DAY="${RESET_DAY#\"}" ;;
+        AUTO_UPDATE) AUTO_UPDATE="${value%\"}"; AUTO_UPDATE="${AUTO_UPDATE#\"}" ;;
         CONFIG_MD5) CONFIG_MD5="${value%\"}"; CONFIG_MD5="${CONFIG_MD5#\"}" ;;
     esac
 done < "${CONFIG_FILE}"
@@ -338,6 +353,11 @@ fi
 ACTIVE_INTERVAL="$REPORT_INTERVAL"
 [ "$COLLECT_INTERVAL" -gt 0 ] && ACTIVE_INTERVAL="$COLLECT_INTERVAL"
 CONFIG_MD5=${CONFIG_MD5:-none}
+AUTO_UPDATE=${AUTO_UPDATE:-0}
+case "$AUTO_UPDATE" in
+    0|1) ;;
+    *) AUTO_UPDATE=0 ;;
+esac
 DEBUG_MODE=${DEBUG_MODE:-0}
 
 SHM_DIR="/tmp"
@@ -356,6 +376,61 @@ log_debug() {
 
 log_warn_debug() {
     [ "$DEBUG_MODE" = "1" ] && echo "[WARN] $(log_ts) $*"
+}
+
+get_install_url() {
+    local url rest origin
+    url="${WORKER_URL%%\?*}"
+    case "$url" in
+        http://*)
+            rest="${url#http://}"
+            origin="http://${rest%%/*}"
+            ;;
+        https://*)
+            rest="${url#https://}"
+            origin="https://${rest%%/*}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    case "$origin" in
+        http://|https://) return 1 ;;
+    esac
+    printf '%s/install-openwrt.sh' "$origin"
+}
+
+schedule_agent_update() {
+    if [ "${AUTO_UPDATE}" != "1" ]; then
+        log_warn_debug "Auto update ignored: local AUTO_UPDATE=${AUTO_UPDATE}"
+        return 0
+    fi
+
+    local now last lock_file install_url tmp_dir
+    lock_file="${CONFIG_DIR}/auto_update.lock"
+    tmp_dir="${SHM_DIR:-/tmp}"
+
+    now=$(date +%s)
+    if [ -f "$lock_file" ]; then
+        last=$(cat "$lock_file" 2>/dev/null || echo 0)
+        case "$last" in ''|*[!0-9]*) last=0 ;; esac
+        if [ $((now - last)) -lt 1800 ]; then
+            log_warn_debug "Auto update already scheduled recently: age=$((now - last))s lock=${lock_file}"
+            return 0
+        fi
+    fi
+
+    mkdir -p "$tmp_dir" "${CONFIG_DIR}" 2>/dev/null || true
+    if ! install_url=$(get_install_url); then
+        log_warn_debug "Auto update skipped: invalid WORKER_URL=${WORKER_URL}"
+        return 1
+    fi
+    log_debug "Auto update requested: install_url=${install_url}"
+
+    nohup /bin/sh -c 'tmp="$2/auto_update_install.$$"; rm -f "$tmp"; if curl -fsSL --connect-timeout 5 -m 30 "$1" -o "$tmp"; then /bin/sh "$tmp" install; fi; rm -f "$tmp"' _ "$install_url" "$tmp_dir" >/dev/null 2>&1 &
+    printf '%s\n' "$now" > "$lock_file" 2>/dev/null || true
+    log_info "Auto update scheduled"
+    return 0
 }
 
 # 动态检测 stdout 指向的日志文件（procd 模式走 syslog 不写文件，此处为空）
@@ -415,39 +490,87 @@ apply_remote_config() {
     local response_file="$1"
     local header_file="$2"
     local bytes=$(wc -c < "$response_file" 2>/dev/null || echo 9999)
-    [ "$bytes" -le 1024 ] || return 1
+    if [ "$bytes" -gt 1024 ]; then
+        log_warn_debug "Remote config rejected: response too large bytes=${bytes}"
+        return 1
+    fi
     local body=$(cat "$response_file" 2>/dev/null) || return 1
-    case "$body" in ''|*[!a-z0-9_=\&.\-]*) return 1 ;; esac
-    local md5=$(awk 'tolower($1)=="x-agent-config-md5:" { gsub("\r", "", $2); print tolower($2); exit }' "$header_file")
-    [ "${#md5}" -eq 32 ] || return 1
-    case "$md5" in *[!0-9a-f]*) return 1 ;; esac
+    log_debug "Remote config raw: bytes=${bytes} body=${body}"
+    case "$body" in
+        '') log_warn_debug "Remote config rejected: empty body"; return 1 ;;
+        *[!a-z0-9_=\&.\-:]*) log_warn_debug "Remote config rejected: invalid characters body=${body}"; return 1 ;;
+    esac
 
+    local collect=""
+    local report=""
+    local reset=""
+    local schema=""
+    local ct=""
+    local cu=""
+    local cm=""
+    local bd=""
     local rx_corr=""
     local tx_corr=""
+    local update=""
     local saved_ifs="$IFS"
     IFS='&'
     for _f in $body; do
         _k="${_f%%=*}"; _v="${_f#*=}"
         case "$_k" in
-            collect_interval) local collect="$_v" ;;
-            report_interval)  local report="$_v" ;;
-            reset_day)        local reset="$_v" ;;
-            schema_version)   local schema="$_v" ;;
-            custom_ct)        local ct="$_v" ;;
-            custom_cu)        local cu="$_v" ;;
-            custom_cm)        local cm="$_v" ;;
-            custom_bd)        local bd="$_v" ;;
-            rx_correction)    local rx_corr="$_v" ;;
-            tx_correction)    local tx_corr="$_v" ;;
+            collect_interval) collect="$_v" ;;
+            report_interval)  report="$_v" ;;
+            reset_day)        reset="$_v" ;;
+            schema_version)   schema="$_v" ;;
+            custom_ct)        ct="$_v" ;;
+            custom_cu)        cu="$_v" ;;
+            custom_cm)        cm="$_v" ;;
+            custom_bd)        bd="$_v" ;;
+            rx_correction)    rx_corr="$_v" ;;
+            tx_correction)    tx_corr="$_v" ;;
+            update)           update="$_v" ;;
+            '')               ;;
+            *)                IFS="$saved_ifs"; log_warn_debug "Remote config rejected: unknown field=${_k}"; return 1 ;;
         esac
     done
     IFS="$saved_ifs"
 
-    case "$collect" in 0|1|2|5|10) ;; *) return 1 ;; esac
-    case "$report" in 30|60|120|180) ;; *) return 1 ;; esac
-    case "$reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) return 1 ;; esac
-    [ "$schema" = "2" ] || return 1
-    [ "$report" -ge "$collect" ] || return 1
+    local has_config=0
+    if [ -n "$collect" ] || [ -n "$report" ] || [ -n "$reset" ] || [ -n "$schema" ]; then
+        has_config=1
+    fi
+    log_debug "Remote config parsed: has_config=${has_config} update=${update:-} collect=${collect:-} report=${report:-} reset=${reset:-} schema=${schema:-} rx_corr=${rx_corr:-} tx_corr=${tx_corr:-}"
+
+    if [ "$has_config" = "0" ]; then
+        if [ "$update" = "1" ]; then
+            log_debug "Remote update-only instruction received"
+            schedule_agent_update
+            return 0
+        fi
+        log_warn_debug "Remote config rejected: no config fields and update=${update:-}"
+        return 1
+    fi
+
+    local md5=$(awk 'tolower($1)=="x-agent-config-md5:" { gsub("\r", "", $2); print tolower($2); exit }' "$header_file")
+    if [ "${#md5}" -ne 32 ]; then
+        log_warn_debug "Remote config rejected: invalid md5 length md5=${md5:-}"
+        return 1
+    fi
+    case "$md5" in *[!0-9a-f]*) log_warn_debug "Remote config rejected: invalid md5 chars md5=${md5}"; return 1 ;; esac
+    log_debug "Remote config md5: current=${CONFIG_MD5:-none} remote=${md5}"
+
+    case "$collect" in 0|1|2|5|10) ;; *) log_warn_debug "Remote config rejected: invalid collect_interval=${collect:-}"; return 1 ;; esac
+    case "$report" in 30|60|120|180) ;; *) log_warn_debug "Remote config rejected: invalid report_interval=${report:-}"; return 1 ;; esac
+    case "$reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) log_warn_debug "Remote config rejected: invalid reset_day=${reset:-}"; return 1 ;; esac
+    case "$update" in ''|0|1) ;; *) log_warn_debug "Remote config rejected: invalid update=${update}"; return 1 ;; esac
+    if [ "$schema" != "2" ]; then
+        log_warn_debug "Remote config rejected: invalid schema_version=${schema:-}"
+        return 1
+    fi
+    if [ "$report" -lt "$collect" ]; then
+        log_warn_debug "Remote config rejected: report_interval=${report} less than collect_interval=${collect}"
+        return 1
+    fi
+
     if [ "$md5" != "${CONFIG_MD5:-none}" ]; then
         persist_dynamic_config "$collect" "$report" "$reset" "$md5" "$ct" "$cu" "$cm" "$bd" || return 1
         COLLECT_INTERVAL="$collect"
@@ -483,6 +606,12 @@ apply_remote_config() {
             send_correction_confirm "$rx_corr" "$tx_corr" || true
         fi
     fi
+
+    if [ "$update" = "1" ]; then
+        log_debug "Remote config includes update=1"
+        schedule_agent_update || true
+    fi
+    return 0
 }
 
 normalize_correction_value() {
@@ -753,15 +882,45 @@ get_tcp_ping_nc() {
     return 1
 }
 
+split_probe_target() (
+    target="${1:-}"
+    default_port="${2:-443}"
+    probe_host="$target"
+    probe_port="$default_port"
+
+    case "$target" in
+        ''|*[!A-Za-z0-9._:-]*) exit 1 ;;
+        *:*)
+            case "${target#*:}" in *:*) exit 1 ;; esac
+            probe_host="${target%:*}"
+            probe_port="${target##*:}"
+            ;;
+    esac
+
+    case "$probe_host" in ''|-*) exit 1 ;; esac
+    case "$probe_port" in ''|*[!0-9]*|??????*) exit 1 ;; esac
+    [ "$probe_port" -ge 1 ] && [ "$probe_port" -le 65535 ] || exit 1
+
+    printf '%s %s\n' "$probe_host" "$probe_port"
+)
+
 get_probe() {
-    local host="${1:-}"
+    local target="${1:-}"
     local count="${2:-4}"
     local port="${3:-443}"
 
-    if [ -z "$host" ]; then
+    if [ -z "$target" ]; then
         echo "null 100"
         return
     fi
+
+    local host probe_target
+    if ! probe_target=$(split_probe_target "$target" "$port"); then
+        echo "null 100"
+        return
+    fi
+    host="${probe_target% *}"
+    port="${probe_target##* }"
 
     if has_nc_zero_io && get_time_ms >/dev/null 2>&1; then
         local ok=0 total_rtt=0 i=1 rtt
@@ -821,6 +980,10 @@ run_network_worker() {
     set -eu
     last_ip=0
     last_probe=0
+    probe_interval="${REPORT_INTERVAL:-60}"
+    case "$probe_interval" in ''|*[!0-9]*) probe_interval=60 ;; esac
+    [ "$probe_interval" -lt 30 ] && probe_interval=30
+    [ "$probe_interval" -gt 60 ] && probe_interval=60
 
     while true; do
         now=$(date +%s)
@@ -831,7 +994,7 @@ run_network_worker() {
             last_ip="$now"
         fi
 
-        if [ $((now - last_probe)) -ge 30 ] || [ "$last_probe" -eq 0 ]; then
+        if [ $((now - last_probe)) -ge "$probe_interval" ] || [ "$last_probe" -eq 0 ]; then
             refresh_probe_async
             last_probe="$now"
         fi
@@ -1013,6 +1176,7 @@ EOF
         REPORT_HTTP_CODE=$(curl -sS -D "$REPORT_HEADER_FILE" -o "$REPORT_RESPONSE_FILE" -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "X-Agent-Config-Schema: 2" \
+            -H "X-Agent-Version: ${AGENT_VERSION}" \
             -H "X-Agent-Config-Md5: ${CONFIG_MD5:-none}" \
             -d "$PAYLOAD" -m 8 --connect-timeout 3 "$WORKER_URL" 2>/dev/null || echo 000)
         case "$REPORT_HTTP_CODE" in ''|*[!0-9]*) REPORT_HTTP_CODE=000 ;; esac
@@ -1210,6 +1374,7 @@ install_probe() {
     CM_NODE=""
     BD_NODE=""
     RESET_DAY=""
+    AUTO_UPDATE=""
     RX_CORRECTION=""
     TX_CORRECTION=""
 
@@ -1225,6 +1390,7 @@ install_probe() {
             -cm=*) CM_NODE="${arg#-cm=}" ;;
             -bd=*) BD_NODE="${arg#-bd=}" ;;
             -reset_day=*) RESET_DAY="${arg#-reset_day=}" ;;
+            -auto_update=*|-auto-update=*) AUTO_UPDATE=$(normalize_binary_value "${arg#*=}") || error "auto_update 参数非法，仅支持 0 或 1" ;;
             -rx_correction=*) RX_CORRECTION="${arg#-rx_correction=}" ;;
             -tx_correction=*) TX_CORRECTION="${arg#-tx_correction=}" ;;
         esac
@@ -1245,6 +1411,7 @@ install_probe() {
             REPORT_INTERVAL=${REPORT_INTERVAL:-60}
             [ -z "$RESET_DAY" ] && RESET_DAY=1
             normalize_probe_config
+            AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
             
             step "更新配置文件..."
             cat > "${CONFIG_FILE}" << EOF
@@ -1258,6 +1425,7 @@ CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
 BD_NODE="${BD_NODE:-}"
 RESET_DAY="${RESET_DAY}"
+AUTO_UPDATE="${AUTO_UPDATE}"
 CONFIG_MD5="none"
 EOF
             chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
@@ -1276,6 +1444,7 @@ EOF
                     CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
                     BD_NODE) BD_NODE="${value%\"}"; BD_NODE="${BD_NODE#\"}" ;;
                     RESET_DAY) RESET_DAY="${value%\"}"; RESET_DAY="${RESET_DAY#\"}" ;;
+                    AUTO_UPDATE) AUTO_UPDATE="${value%\"}"; AUTO_UPDATE="${AUTO_UPDATE#\"}" ;;
                 esac
             done < "${CONFIG_FILE}"
         fi
@@ -1288,6 +1457,7 @@ EOF
         REPORT_INTERVAL=${REPORT_INTERVAL:-60}
         [ -z "$RESET_DAY" ] && RESET_DAY=1
         normalize_probe_config
+        AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
 
         step "创建配置目录..."
         mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
@@ -1314,6 +1484,7 @@ CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
 BD_NODE="${BD_NODE:-}"
 RESET_DAY="${RESET_DAY}"
+AUTO_UPDATE="${AUTO_UPDATE}"
 CONFIG_MD5="none"
 EOF
         chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
@@ -1323,6 +1494,7 @@ EOF
     COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
     REPORT_INTERVAL=${REPORT_INTERVAL:-60}
     normalize_probe_config
+    AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
 
     if [ -n "${RX_CORRECTION}" ] || [ -n "${TX_CORRECTION}" ]; then
         step "应用流量校正..."
@@ -1353,7 +1525,7 @@ EOF
     start_service
 
     printf '\n%b=============================================%b\n' "${GREEN}" "${NC}"
-    printf  '         CF-Server-Monitor 安装成功\n'
+    printf  '         CF-Server-Monitor %s 安装成功\n' "${AGENT_VERSION}"
     printf  '%b=============================================%b\n' "${GREEN}" "${NC}"
     printf  '  服务状态 : %bActive (Running)%b\n' "${GREEN}" "${NC}"
     printf  '  配置参数 :\n'
@@ -1362,6 +1534,7 @@ EOF
     printf  '    ● Worker URL  : %s\n' "${WORKER_URL}"
     printf  '    ● 上报间隔    : %s秒\n' "${REPORT_INTERVAL}"
     printf  '    ● 采样间隔    : %s秒\n' "${COLLECT_INTERVAL}"
+    printf  '    ● 自动更新    : %s\n' "${AUTO_UPDATE}"
     [ -n "${RX_CORRECTION}" ] && printf  '    ● 下行校正    : %sGB\n' "${RX_CORRECTION}"
     [ -n "${TX_CORRECTION}" ] && printf  '    ● 上行校正    : %sGB\n' "${TX_CORRECTION}"
     if [ "${RESET_DAY}" = "0" ]; then

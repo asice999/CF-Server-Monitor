@@ -94,21 +94,25 @@
       <div class="form-row">
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.customCt }} <span class="text-xs text-muted">({{ trans.serverLevel }})</span></label>
-          <input type="text" name="edit_custom_ct" autocomplete="off" v-model="editForm.custom_ct" class="form-input" :placeholder="settings.custom_ct || 'gd-ct-dualstack.ip.zstaticcdn.com'">
+          <input type="text" name="edit_custom_ct" autocomplete="off" v-model.trim="editForm.custom_ct" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_ct }]" :placeholder="settings.custom_ct || 'gd-ct-dualstack.ip.zstaticcdn.com'">
+          <p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
         </div>
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.customCu }} <span class="text-xs text-muted">({{ trans.serverLevel }})</span></label>
-          <input type="text" name="edit_custom_cu" autocomplete="off" v-model="editForm.custom_cu" class="form-input" :placeholder="settings.custom_cu || 'gd-cu-dualstack.ip.zstaticcdn.com'">
+          <input type="text" name="edit_custom_cu" autocomplete="off" v-model.trim="editForm.custom_cu" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cu }]" :placeholder="settings.custom_cu || 'gd-cu-dualstack.ip.zstaticcdn.com'">
+          <p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
         </div>
       </div>
       <div class="form-row">
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.customCm }} <span class="text-xs text-muted">({{ trans.serverLevel }})</span></label>
-          <input type="text" name="edit_custom_cm" autocomplete="off" v-model="editForm.custom_cm" class="form-input" :placeholder="settings.custom_cm || 'gd-cm-dualstack.ip.zstaticcdn.com'">
+          <input type="text" name="edit_custom_cm" autocomplete="off" v-model.trim="editForm.custom_cm" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cm }]" :placeholder="settings.custom_cm || 'gd-cm-dualstack.ip.zstaticcdn.com'">
+          <p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
         </div>
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.customBd }} <span class="text-xs text-muted">({{ trans.serverLevel }})</span></label>
-          <input type="text" name="edit_custom_bd" autocomplete="off" v-model="editForm.custom_bd" class="form-input" :placeholder="settings.custom_bd || 'lf3-ips.zstaticcdn.com'">
+          <input type="text" name="edit_custom_bd" autocomplete="off" v-model.trim="editForm.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" :placeholder="settings.custom_bd || 'lf3-ips.zstaticcdn.com'">
+          <p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
         </div>
       </div>
 
@@ -126,6 +130,15 @@
         <span class="warning-icon">[i]</span> {{ trans.correctionHint }}
       </div>
       <div class="form-row">
+        <div class="form-group">
+          <div class="checkbox-item no-margin">
+            <input type="checkbox" :checked="editForm.auto_update" @change="handleAutoUpdateChange">
+            <label>
+              <b>{{ trans.autoUpdate }}</b>
+            </label>
+          </div>
+        </div>
+
         <div class="form-group">
           <div class="checkbox-item no-margin">
             <input type="checkbox" v-model="editForm.is_hidden">
@@ -148,7 +161,7 @@
       </div>
 
       <div class="modal-footer flex-justify-between">
-        <button @click="$emit('save')" class="btn btn-primary">{{ trans.save }}</button>
+        <button @click="$emit('save')" class="btn btn-primary" :disabled="hasPingNodeErrors">{{ trans.save }}</button>
         <button @click="$emit('close')" class="btn">{{ trans.cancel }}</button>
       </div>
     </div>
@@ -156,14 +169,38 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
+import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'
+
 const editForm = defineModel('editForm', { type: Object, required: true })
 
-defineProps({
+const props = defineProps({
   trans: { type: Object, required: true },
   show: { type: Boolean, default: false },
   currentServerName: { type: String, default: '' },
   settings: { type: Object, required: true }
 })
 
-defineEmits(['save', 'close'])
+const pingNodeErrorMessage = computed(() => (
+  props.trans.invalidPingNodeFormat || 'Use domain, IPv4, or host:port. Port must be 1-65535.'
+))
+
+const pingNodeErrors = computed(() => Object.fromEntries(
+  PING_NODE_FIELDS.map(field => [
+    field,
+    validatePingNode(editForm.value[field]).valid ? '' : pingNodeErrorMessage.value
+  ])
+))
+
+const hasPingNodeErrors = computed(() => Object.values(pingNodeErrors.value).some(Boolean))
+
+const emit = defineEmits(['save', 'close', 'toggle-auto-update'])
+
+const handleAutoUpdateChange = (event) => {
+  const nextValue = event.target.checked
+  if (nextValue) {
+    event.target.checked = false
+  }
+  emit('toggle-auto-update', nextValue)
+}
 </script>

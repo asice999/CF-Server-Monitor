@@ -1,4 +1,5 @@
-const CURRENT_VERSION = 'V2.7.11 Beta';
+const CURRENT_VERSION = '2.7.12 Beta';
+export const AGENT_VERSION = '1.3.1';
 export const DEFAULT_SITE_TITLE = 'Cloudflare Server Monitor';
 export const APPEARANCE_FIELDS = ['site_title', 'custom_bg', 'custom_head', 'custom_script', 'csp_static', 'csp_api'];
 export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_time', 'show_long_history', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'expire_reminder','history_id_optimized','servers_optimized'];

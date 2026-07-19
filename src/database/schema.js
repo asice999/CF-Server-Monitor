@@ -44,6 +44,7 @@ export async function initDatabase(db) {
           reset_day INTEGER DEFAULT 1,
           collect_interval INTEGER DEFAULT 0,
           report_interval INTEGER DEFAULT 60,
+          auto_update TEXT DEFAULT '0',
           custom_ct TEXT DEFAULT '',
           custom_cu TEXT DEFAULT '',
           custom_cm TEXT DEFAULT '',
@@ -72,6 +73,7 @@ export async function initDatabase(db) {
           id INTEGER PRIMARY KEY,
           server_id TEXT NOT NULL,
           timestamp INTEGER DEFAULT 0,
+          agent_version TEXT DEFAULT '',
           cpu REAL DEFAULT 0,
           load_avg TEXT DEFAULT '0',
           net_in_speed REAL DEFAULT 0,
@@ -344,94 +346,103 @@ export async function weeklyCleanup(db) {
   }
 }
 
-export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null) {
-  try {
-    const historyId = buildHistoryId(historyPartitionId, timestamp);
-    const rawTimestamp = Number(timestamp);
-    const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
-      ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
-      : Date.now();
-    
-    const parsePing = (val) => {
-      if (val === '' || val === null || val === undefined) return null;
-      const num = parseInt(val);
-      return (num > 0) ? num : null;
-    };
+export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
+  const historyId = buildHistoryId(historyPartitionId, timestamp);
+  const rawTimestamp = Number(timestamp);
+  const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
+    ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
+    : Date.now();
 
-    const parseLoss = (val) => {
-      if (val === '' || val === null || val === undefined) return null;
-      const num = parseInt(val);
-      if (Number.isNaN(num)) return null;
-      return Math.max(0, Math.min(100, num));
-    };
-    
+  const parsePing = (val) => {
+    if (val === '' || val === null || val === undefined) return null;
+    const num = parseInt(val);
+    return (num > 0) ? num : null;
+  };
+
+  const parseLoss = (val) => {
+    if (val === '' || val === null || val === undefined) return null;
+    const num = parseInt(val);
+    if (Number.isNaN(num)) return null;
+    return Math.max(0, Math.min(100, num));
+  };
+
+  const insertHistoryRow = async () => {
     await db.prepare(`
-      INSERT INTO metrics_history (
-        id, server_id, timestamp, cpu, load_avg,
-        net_in_speed, net_out_speed, net_rx, net_tx,
-        processes, tcp_conn, udp_conn,
-        ping_ct, ping_cu, ping_cm, ping_bd,
-        loss_ct, loss_cu, loss_cm, loss_bd,
-        ram_total, ram_used, swap_total, swap_used,
-        disk_total, disk_used,
-        cpu_cores, cpu_info, gpu, gpu_info, arch, os, region, ip_v4, ip_v6, boot_time,
-        net_rx_monthly, net_tx_monthly
-      ) VALUES (
-        ?,?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?
-      )
-    `).bind(
-      historyId,
-      serverId,
-      now,
-      parseFloat(metrics.cpu) || 0,
-      metrics.load || metrics.load_avg || '0 0 0',
-      parseFloat(metrics.net_in_speed) || 0,
-      parseFloat(metrics.net_out_speed) || 0,
-      parseFloat(metrics.net_rx) || 0,
-      parseFloat(metrics.net_tx) || 0,
-      parseInt(metrics.processes) || 0,
-      parseInt(metrics.tcp_conn) || 0,
-      parseInt(metrics.udp_conn) || 0,
-      parsePing(metrics.ping_ct),
-      parsePing(metrics.ping_cu),
-      parsePing(metrics.ping_cm),
-      parsePing(metrics.ping_bd),
-      parseLoss(metrics.loss_ct),
-      parseLoss(metrics.loss_cu),
-      parseLoss(metrics.loss_cm),
-      parseLoss(metrics.loss_bd),
-      parseFloat(metrics.ram_total) || 0,
-      parseFloat(metrics.ram_used) || 0,
-      parseFloat(metrics.swap_total) || 0,
-      parseFloat(metrics.swap_used) || 0,
-      parseFloat(metrics.disk_total) || 0,
-      parseFloat(metrics.disk_used) || 0,
-      parseInt(metrics.cpu_cores) || 0,
-      metrics.cpu_info || '',
-      metrics.gpu === '' || metrics.gpu === null || metrics.gpu === undefined ? null : (parseFloat(metrics.gpu) || 0),
-      metrics.gpu_info || '',
-      metrics.arch || '',
-      metrics.os || '',
-      regionCode,
-      metrics.ip_v4 || '0',
-      metrics.ip_v6 || '0',
-      metrics.boot_time || '',
-      parseFloat(metrics.net_rx_monthly) || 0,
-      parseFloat(metrics.net_tx_monthly) || 0
+    INSERT INTO metrics_history (
+      id, server_id, timestamp, agent_version, cpu, load_avg,
+      net_in_speed, net_out_speed, net_rx, net_tx,
+      processes, tcp_conn, udp_conn,
+      ping_ct, ping_cu, ping_cm, ping_bd,
+      loss_ct, loss_cu, loss_cm, loss_bd,
+      ram_total, ram_used, swap_total, swap_used,
+      disk_total, disk_used,
+      cpu_cores, cpu_info, gpu, gpu_info, arch, os, region, ip_v4, ip_v6, boot_time,
+      net_rx_monthly, net_tx_monthly
+    ) VALUES (
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?
+    )
+  `).bind(
+    historyId,
+    serverId,
+    now,
+    agentVersion || '',
+    parseFloat(metrics.cpu) || 0,
+    metrics.load || metrics.load_avg || '0 0 0',
+    parseFloat(metrics.net_in_speed) || 0,
+    parseFloat(metrics.net_out_speed) || 0,
+    parseFloat(metrics.net_rx) || 0,
+    parseFloat(metrics.net_tx) || 0,
+    parseInt(metrics.processes) || 0,
+    parseInt(metrics.tcp_conn) || 0,
+    parseInt(metrics.udp_conn) || 0,
+    parsePing(metrics.ping_ct),
+    parsePing(metrics.ping_cu),
+    parsePing(metrics.ping_cm),
+    parsePing(metrics.ping_bd),
+    parseLoss(metrics.loss_ct),
+    parseLoss(metrics.loss_cu),
+    parseLoss(metrics.loss_cm),
+    parseLoss(metrics.loss_bd),
+    parseFloat(metrics.ram_total) || 0,
+    parseFloat(metrics.ram_used) || 0,
+    parseFloat(metrics.swap_total) || 0,
+    parseFloat(metrics.swap_used) || 0,
+    parseFloat(metrics.disk_total) || 0,
+    parseFloat(metrics.disk_used) || 0,
+    parseInt(metrics.cpu_cores) || 0,
+    metrics.cpu_info || '',
+    metrics.gpu === '' || metrics.gpu === null || metrics.gpu === undefined ? null : (parseFloat(metrics.gpu) || 0),
+    metrics.gpu_info || '',
+    metrics.arch || '',
+    metrics.os || '',
+    regionCode,
+    metrics.ip_v4 || '0',
+    metrics.ip_v6 || '0',
+    metrics.boot_time || '',
+    parseFloat(metrics.net_rx_monthly) || 0,
+    parseFloat(metrics.net_tx_monthly) || 0
     ).run();
+  };
+
+  try {
+    await insertHistoryRow();
   } catch (e) {
-    // 检测是否是 "has no column" 错误，如果是则添加缺失字段
-    if (e.message && /has no column/i.test(e.message)) {
+    if (e?.message && /has no column/i.test(e.message)) {
       console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
       await addHistoryColumns(db);
+      try {
+        await insertHistoryRow();
+      } catch (retryError) {
+        console.error('保存历史数据失败:', retryError);
+      }
       return;
     }
     console.error('保存历史数据失败:', e);

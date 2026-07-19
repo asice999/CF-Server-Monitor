@@ -130,10 +130,14 @@
               </td>
               <td><b>{{ server.name }}</b></td>
               <td>
-                <span v-if="server.region && server.region !== 'xx'">
+                <span v-if="server.region && server.region !== 'xx'" class="country-os-icons">
                   <img :src="getPublicAssetUrl('flags/' + getFlagRegionCode(server.region) + '.svg')" :alt="server.region" class="flag-img">
+                  <OsIcon :os="server.os" />
                 </span>
-                <span v-else>🏳️</span>
+                <span v-else class="country-os-icons">
+                  <span class="flag-fallback">🏳️</span>
+                  <OsIcon :os="server.os" />
+                </span>
                 {{ (server.region || 'XX').toUpperCase() }}
               </td>
               <td><span class="os-label">{{ server.os || 'N/A' }} / {{ server.arch || 'N/A' }} </span></td>
@@ -218,6 +222,7 @@ import { useRouter } from 'vue-router'
 import TerminalHeader from '../components/TerminalHeader.vue'
 import ServerCard from '../components/ServerCard.vue'
 import Footer from '../components/Footer.vue'
+import OsIcon from '../components/OsIcon.vue'
 import { fetchConfig, fetchServersAll, fetchServersAllWithProgress, formatBytes, createLiveSocket, getFlagRegionCode, getApiBases, getTrafficUsagePercent, isServerOnline } from '../utils/api.js'
 import { getTitle, hasMultipleApiBases, getPublicAssetUrl } from '../utils/config'
 import { currentLang, useTranslation } from '../utils/i18n.js'

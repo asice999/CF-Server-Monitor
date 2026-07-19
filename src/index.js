@@ -11,6 +11,7 @@ import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCac
 import { AppError, createSuccessResponse, createUnauthorizedResponse, createBadRequestResponse, createNotFoundResponse, createErrorResponse } from './utils/errors.js';
 import { verifyTurnstileToken } from './utils/common.js';
 import { getCorsAllowedOrigins, createOptionsResponse, applyCors } from './utils/cors.js';
+import { getRemoteVersion } from './utils/version.js';
 // Durable Objects: 实时指标广播
 // 显式 import + extends，确保 wrangler 静态分析器能在入口文件直接识别此 DO 类
 import { MetricsBroadcaster as _MetricsBroadcaster }
@@ -254,9 +255,14 @@ export default {
         }
 
         const isLoggedIn = await checkAuth(request, env, sys);
+        const remoteVersion = isLoggedIn ? await getRemoteVersion() : null;
 
         return createSuccessResponse({
           version: getCurrentVersion(),
+          ...(isLoggedIn ? {
+            last_workers_version: remoteVersion?.workers || null,
+            last_agent_version: remoteVersion?.agent || null
+          } : {}),
           is_public: sys.is_public === 'true',
           authorization: isLoggedIn,
           turnstile_enabled: turnstileEnabled,

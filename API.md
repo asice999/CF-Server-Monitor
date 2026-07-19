@@ -207,6 +207,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 - Headers：
   ```
   Content-Type: application/json
+  X-Agent-Version: <探针版本号>
   X-Agent-Config-Schema: 2
   X-Agent-Config-Md5: <最后成功应用的配置 MD5，首次为 none>
   ```
@@ -360,20 +361,26 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 ```json
 {
+  "version": "V2.7.11 Beta",
   "turnstile_enabled": true,
   "turnstile_site_key": "1x00000000000000000000AA",
   "verified": false,
   "turnstile_verified": "BASE64_AES_GCM_ENCRYPTED_STRING_OR_NULL",
+  "last_workers_version": "V2.7.11 Beta",
+  "last_agent_version": "1.3.0",
   "show_long_history": true
 }
 ```
 
 | 字段                   | 类型           | 说明                                     |
 | -------------------- | ------------ | -------------------------------------- |
+| `version`            | string       | 当前部署自身 Workers 版本                         |
 | `turnstile_enabled`  | boolean      | 站点是否启用人机验证                             |
 | `turnstile_site_key` | string       | Turnstile 前端公钥；前端拿到后渲染 widget          |
 | `verified`           | boolean      | 当前请求是否携带了有效的 `X-Turnstile-Verified`    |
 | `turnstile_verified` | string\|null | 当次验证成功后回写给客户端的"已验证凭证"，客户端应回存并在 1 小时内复用 |
+| `last_workers_version` | string\|null | 登录时返回远程最新 Workers 版本；来源为 GitHub `version.json`，后端缓存 5 分钟 |
+| `last_agent_version` | string\|null | 登录时返回远程最新 Agent 版本；来源为 GitHub `version.json`，后端缓存 5 分钟 |
 | `show_long_history`  | boolean      | 是否允许查看超过 1 小时的历史曲线（未登录用户**强制** 1 小时上限） |
 
 > `X-Turnstile-Token` 携带且验证成功时，响应头会同步设置 `X-Turnstile-Verified`（加密串）。
@@ -1159,6 +1166,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
 | `gpu_info`                                    | string             | GPU 型号                    |
 | `arch`                                        | string             | 架构                        |
 | `os`                                          | string             | OS 名称                     |
+| `agent_version`                               | string             | 最新一次上报的探针版本号              |
 | `region`                                      | string             | 区域代码（大写，兼容 ISO 国家码）       |
 | `ip_v4`                                       | string `"0"`/`"1"` | IPv4 可达性                  |
 | `ip_v6`                                       | string `"0"`/`"1"` | IPv6 可达性                  |
@@ -1204,10 +1212,10 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
   password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级
   cloudflare_account_id: string,
   cloudflare_token: string,
-  custom_ct: string,             // 电信测速节点域名
-  custom_cu: string,             // 联通
-  custom_cm: string,             // 移动
-  custom_bd: string,             // BGP
+  custom_ct: string,             // 电信测速节点 host[:port]
+  custom_cu: string,             // 联通 host[:port]
+  custom_cm: string,             // 移动 host[:port]
+  custom_bd: string,             // BGP host[:port]
   expire_reminder: 'true' | 'false'
 }
 ```

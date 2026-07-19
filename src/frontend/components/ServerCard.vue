@@ -2,11 +2,14 @@
   <router-link :to="to" class="server-card" :data-region="regionCode">
     <div class="server-card-header">
       <div class="server-identity">
-        <div class="status-indicator" :style="{ background: statusColor, boxShadow: '0 0 8px ' + statusColor }"></div>
-        <span v-if="regionCode && regionCode !== 'xx'">
+        <span v-if="regionCode && regionCode !== 'xx'" class="country-os-icons">
           <img class="flag-img" :src="getPublicAssetUrl('flags/' + regionCode + '.svg')" :alt="regionCode">
+          <OsIcon :os="server.os" />
         </span>
-        <span v-else>🏳️</span>
+        <span v-else class="country-os-icons">
+          <span class="flag-fallback">🏳️</span>
+          <OsIcon :os="server.os" />
+        </span>
         <span class="server-name">{{ server.name }}</span>
       </div>
       <span class="status-label" :style="{ color: statusColor, borderColor: statusColor }">{{ statusText }}</span>
@@ -93,6 +96,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import OsIcon from './OsIcon.vue'
 import { formatBytes, getFlagRegionCode, getTrafficUsagePercent, isServerOnline } from '../utils/api'
 import { getPublicAssetUrl } from '../utils/config'
 import { useTranslation } from '../utils/i18n'

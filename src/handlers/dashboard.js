@@ -8,6 +8,7 @@ function withoutPrivateServerFields(server) {
   const item = { ...server };
   delete item.bandwidth;
   delete item.note;
+  delete item.auto_update;
   return item;
 }
 

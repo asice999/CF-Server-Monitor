@@ -34,7 +34,7 @@
             <span class="prompt">$</span> {{ trans.sudoStatus }}
           </div>
           <div class="header-actions">
-            <button @click="loadServers" class="btn" :disabled="adminSiteLoading">↻ {{ trans.refresh }}</button>
+            <button @click="refreshServers" class="btn" :disabled="adminSiteLoading">↻ {{ trans.refresh }}</button>
             <select
               v-if="isMultipleMode"
               v-model.number="selectedApiIndex"
@@ -103,6 +103,7 @@
           :groups="groups"
           :active-tab="activeTab"
           :selected-api-index="selectedApiIndex"
+          :latest-agent-version="latestAgentVersion"
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
           @add-server="addServer"
@@ -154,7 +155,32 @@
         :settings="settings"
         @save="saveEdit"
         @close="closeEditModal"
+        @toggle-auto-update="handleAutoUpdateToggle"
       />
+
+      <div v-if="showAutoUpdateWarning" id="autoUpdateWarningModal" class="modal-overlay auto-update-warning-modal active">
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <div class="modal-title">{{ trans.autoUpdateRiskTitle }}</div>
+            <button class="modal-close" @click="cancelAutoUpdateWarning">✕</button>
+          </div>
+
+          <div class="danger-box mb-4">
+            <div class="flex-center-gap-sm mb-2">
+              <span class="danger-icon text-xl">⚠️</span>
+              <span class="danger-label">{{ trans.autoUpdateRiskTitle }}</span>
+            </div>
+            <p class="text-secondary text-sm line-height-1-6">
+              {{ trans.autoUpdateRiskDesc }}
+            </p>
+          </div>
+
+          <div class="modal-footer flex-justify-between">
+            <button @click="confirmAutoUpdateWarning" class="btn btn-primary">{{ trans.autoUpdateRiskConfirm }}</button>
+            <button @click="cancelAutoUpdateWarning" class="btn">{{ trans.autoUpdateRiskCancel }}</button>
+          </div>
+        </div>
+      </div>
 
       <DeleteServerModal
         :trans="trans"
@@ -184,6 +210,7 @@
         :reset-day="resetDay"
         :rx-correction="rxCorrection"
         :tx-correction="txCorrection"
+        :auto-update="autoUpdate"
         :install-command="getCustomInstallCommand()"
         :copied-cmd="copiedCmd"
         @close="closeCopyModal"
@@ -417,9 +444,10 @@ import DatabasePanel from './components/DatabasePanel.vue'
 import EditServerModal from './components/EditServerModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
 import CopyCommandModal from './components/CopyCommandModal.vue'
-import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, getApiBases } from '../../utils/api'
+import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, getApiBases, fetchConfig } from '../../utils/api'
 import { hasMultipleApiBases } from '../../utils/config.js'
 import { t, useTranslation } from '../../utils/i18n'
+import { PING_NODE_FIELDS, validatePingNode } from '../../utils/pingNode.js'
 import { usePasswordVisibility } from '../../composables/usePasswordVisibility'
 import { useTurnstile } from './composables/useTurnstile'
 
@@ -476,6 +504,7 @@ const servers = ref([])
 const selectedServers = ref([])
 const stats = ref({ total: '-', online: 0, offline: 0, avg_cpu: 0 })
 const groups = ref(['Default'])
+const latestAgentVersion = ref('')
 const newServerName = ref('')
 const newServerGroup = ref('')
 
@@ -556,6 +585,7 @@ const editForm = ref({
   custom_bd: '',
   rx_correction: '',
   tx_correction: '',
+  auto_update: false,
   is_hidden: false,
   offline_notify_disabled: false
 })
@@ -577,6 +607,8 @@ const d1UsageLoading = ref(false)
 const d1UsageResult = ref(null)
 const validationError = ref(null)
 const alertMessage = ref(null)
+const showAutoUpdateWarning = ref(false)
+const autoUpdatePendingEnable = ref(false)
 
 const testNotificationLoading = ref(false)
 
@@ -597,7 +629,29 @@ const customBd = ref('')
 const resetDay = ref(1)
 const rxCorrection = ref('')
 const txCorrection = ref('')
+const autoUpdate = ref(false)
 const copiedCmd = ref(false)
+
+const getPingNodeLabel = (field) => ({
+  custom_ct: trans.value.customCt,
+  custom_cu: trans.value.customCu,
+  custom_cm: trans.value.customCm,
+  custom_bd: trans.value.customBd
+})[field] || field
+
+const getPingNodeValidation = (source) => {
+  const values = {}
+  for (const field of PING_NODE_FIELDS) {
+    const result = validatePingNode(source[field])
+    if (!result.valid) {
+      return { valid: false, field }
+    }
+    values[field] = result.value
+  }
+  return { valid: true, values }
+}
+
+const buildPingNodeError = (field) => `${getPingNodeLabel(field)}: ${trans.value.invalidPingNodeFormat}`
 
 const copyTextToClipboard = async (text) => {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
@@ -659,8 +713,11 @@ const handleLogin = async () => {
     syncApiIndexQuery()
     clearTurnstile()
     turnstileVerified.value = hasSharedTurnstileVerified()
-    loadSettings()
-    loadServers()
+    await Promise.all([
+      loadSettings(),
+      loadServers(),
+      loadLatestAgentVersion()
+    ])
   } else {
     loginError.value = result.status === 403 ? 'Please complete the verification' : trans.value.errorInvalidUsername
     loginForm.value.password = ''
@@ -673,6 +730,7 @@ const handleLogin = async () => {
 const logout = async () => {
   apiLogout()
   isLoggedIn.value = false
+  latestAgentVersion.value = ''
   clearTurnstile()
   await loadTurnstileConfig()
 }
@@ -691,8 +749,11 @@ const initAdmin = async () => {
     if (savedTurnstileToken) {
       turnstileToken.value = savedTurnstileToken
     }
-    loadSettings()
-    loadServers()
+    await Promise.all([
+      loadSettings(),
+      loadServers(),
+      loadLatestAgentVersion()
+    ])
   } else {
     await loadTurnstileConfig()
   }
@@ -728,7 +789,8 @@ const switchAdminSite = async () => {
   try {
     await Promise.all([
       loadSettings(),
-      loadServers()
+      loadServers(),
+      loadLatestAgentVersion()
     ])
   } finally {
     adminSiteLoading.value = false
@@ -738,6 +800,16 @@ const switchAdminSite = async () => {
 const handleAdminApiIndexChange = async () => {
   syncApiIndexQuery()
   await switchAdminSite()
+}
+
+const loadLatestAgentVersion = async () => {
+  try {
+    const config = await fetchConfig(selectedApiIndex.value)
+    latestAgentVersion.value = config?.last_agent_version || ''
+  } catch (e) {
+    console.error('[ERROR] Load latest agent version failed:', e)
+    latestAgentVersion.value = ''
+  }
 }
 
 const loadSettings = async () => {
@@ -789,6 +861,8 @@ const loadSettings = async () => {
 const saveSettings = async () => {
   if (saving.value) return
 
+  validationError.value = null
+
   const jwtSecret = settings.value.jwt_secret
   if (jwtSecret && jwtSecret.length > 0 && jwtSecret.length < 32) {
     validationError.value = trans.value.jwtSecretMinLength
@@ -835,6 +909,12 @@ const saveSettings = async () => {
     }
   }
 
+  const pingNodeValidation = getPingNodeValidation(settings.value)
+  if (!pingNodeValidation.valid) {
+    validationError.value = buildPingNodeError(pingNodeValidation.field)
+    return
+  }
+
   if (settingsPanelRef.value) {
     const cspStaticValid = settingsPanelRef.value.validateCspField('csp_static')
     const cspApiValid = settingsPanelRef.value.validateCspField('csp_api')
@@ -870,10 +950,10 @@ const saveSettings = async () => {
       cloudflare_account_id: settings.value.cloudflare_account_id,
       cloudflare_token: settings.value.cloudflare_token,
       username: settings.value.username,
-      custom_ct: settings.value.custom_ct,
-      custom_cu: settings.value.custom_cu,
-      custom_cm: settings.value.custom_cm,
-      custom_bd: settings.value.custom_bd,
+      custom_ct: pingNodeValidation.values.custom_ct,
+      custom_cu: pingNodeValidation.values.custom_cu,
+      custom_cm: pingNodeValidation.values.custom_cm,
+      custom_bd: pingNodeValidation.values.custom_bd,
       csp_static: settings.value.csp_static || '',
       csp_api: settings.value.csp_api || ''
     }
@@ -919,6 +999,13 @@ const loadServers = async () => {
   } catch (e) {
     console.error('[ERROR] Load servers failed:', e)
   }
+}
+
+const refreshServers = async () => {
+  await Promise.all([
+    loadServers(),
+    loadLatestAgentVersion()
+  ])
 }
 
 const addServer = async () => {
@@ -976,6 +1063,7 @@ const copyCmd = (serverId) => {
   resetDay.value = server?.reset_day ?? 1
   rxCorrection.value = server?.rx_correction ?? ''
   txCorrection.value = server?.tx_correction ?? ''
+  autoUpdate.value = server?.auto_update === '1' || server?.auto_update === 1 || server?.auto_update === true
   copiedCmd.value = false
   showCopyModal.value = true
 }
@@ -984,6 +1072,7 @@ const hasCorrectionValue = (value) => value !== null && value !== undefined && v
 
 const getCustomInstallCommand = () => {
   const HOST = selectedApiBase.value
+  const autoUpdateFlag = autoUpdate.value ? 1 : 0
   if (targetOs.value === 'windows') {
     const params = [
       'install',
@@ -992,7 +1081,8 @@ const getCustomInstallCommand = () => {
       `-Url '${HOST}/update'`,
       `-CollectInterval ${collectInterval.value}`,
       `-ReportInterval ${reportInterval.value}`,
-      `-ResetDay ${resetDay.value ?? 1}`
+      `-ResetDay ${resetDay.value ?? 1}`,
+      `-AutoUpdate ${autoUpdateFlag}`
     ]
     if (customCt.value) params.push(`-CtNode '${customCt.value}'`)
     if (customCu.value) params.push(`-CuNode '${customCu.value}'`)
@@ -1008,7 +1098,7 @@ const getCustomInstallCommand = () => {
     : targetOs.value === 'openwrt' ? 'install-openwrt.sh'
     : targetOs.value === 'mac' ? 'install-mac.sh'
     : 'install.sh'
-  let cmd = `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s install -id=${copyServerId.value} -secret='${apiSecret.value}' -url=${HOST}/update -collect_interval=${collectInterval.value} -interval=${reportInterval.value} -reset_day=${resetDay.value ?? 1}`
+  let cmd = `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s install -id=${copyServerId.value} -secret='${apiSecret.value}' -url=${HOST}/update -collect_interval=${collectInterval.value} -interval=${reportInterval.value} -reset_day=${resetDay.value ?? 1} -auto_update=${autoUpdateFlag}`
   if (customCt.value) cmd += ` -ct=${customCt.value}`
   if (customCu.value) cmd += ` -cu=${customCu.value}`
   if (customCm.value) cmd += ` -cm=${customCm.value}`
@@ -1078,6 +1168,7 @@ const openEditModal = (server) => {
     custom_bd: server.custom_bd || '',
     rx_correction: server.rx_correction ?? '',
     tx_correction: server.tx_correction ?? '',
+    auto_update: server.auto_update === '1' || server.auto_update === 1 || server.auto_update === true,
     is_hidden: server.is_hidden === '1',
     offline_notify_disabled: server.offline_notify_disabled === '1'
   }
@@ -1086,10 +1177,42 @@ const openEditModal = (server) => {
 }
 
 const closeEditModal = () => {
+  cancelAutoUpdateWarning()
   showEditModal.value = false
 }
 
+const handleAutoUpdateToggle = (nextValue) => {
+  if (!nextValue) {
+    editForm.value.auto_update = false
+    cancelAutoUpdateWarning()
+    return
+  }
+  autoUpdatePendingEnable.value = true
+  showAutoUpdateWarning.value = true
+}
+
+const confirmAutoUpdateWarning = () => {
+  if (autoUpdatePendingEnable.value) {
+    editForm.value.auto_update = true
+  }
+  autoUpdatePendingEnable.value = false
+  showAutoUpdateWarning.value = false
+}
+
+const cancelAutoUpdateWarning = () => {
+  autoUpdatePendingEnable.value = false
+  showAutoUpdateWarning.value = false
+}
+
 const saveEdit = async () => {
+  validationError.value = null
+
+  const pingNodeValidation = getPingNodeValidation(editForm.value)
+  if (!pingNodeValidation.valid) {
+    validationError.value = buildPingNodeError(pingNodeValidation.field)
+    return
+  }
+
   const data = {
     action: 'edit',
     id: editForm.value.id,
@@ -1104,12 +1227,13 @@ const saveEdit = async () => {
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
     report_interval: editForm.value.report_interval,
-    custom_ct: editForm.value.custom_ct,
-    custom_cu: editForm.value.custom_cu,
-    custom_cm: editForm.value.custom_cm,
-    custom_bd: editForm.value.custom_bd,
+    custom_ct: pingNodeValidation.values.custom_ct,
+    custom_cu: pingNodeValidation.values.custom_cu,
+    custom_cm: pingNodeValidation.values.custom_cm,
+    custom_bd: pingNodeValidation.values.custom_bd,
     rx_correction: editForm.value.rx_correction,
     tx_correction: editForm.value.tx_correction,
+    auto_update: editForm.value.auto_update ? '1' : '0',
     is_hidden: editForm.value.is_hidden ? '1' : '0',
     offline_notify_disabled: editForm.value.offline_notify_disabled ? '1' : '0'
   }
@@ -1118,6 +1242,7 @@ const saveEdit = async () => {
     const result = await adminApiForSite(data)
     if (!result.error) {
       saveResult.value = { success: true, message: getMessage(result.data.message) || trans.value.serverEdited }
+      cancelAutoUpdateWarning()
       showEditModal.value = false
       loadServers()
     } else {

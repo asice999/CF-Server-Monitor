@@ -8,6 +8,8 @@ import { TIME } from './constants'
 export { getApiBases, getWsBase }
 
 export const VERSION = ref('')
+export const LAST_WORKERS_VERSION = ref('')
+export const LAST_AGENT_VERSION = ref('')
 
 export const createLiveSocket = (subscribe, handlers = {}, apiIndex = 0, serverIds = []) => {
   const { onUpdate, onStatus, onMessage } = handlers
@@ -368,12 +370,14 @@ export const logout = () => {
   localStorage.removeItem('jwt_token')
 }
 
-export const fetchConfig = async () => {
-  const result = await http.get('/api/config', { includeAuth: true, includeTurnstile: false })
+export const fetchConfig = async (apiIndex = 0) => {
+  const result = await http.getByIndex('/api/config', apiIndex, { includeAuth: true, includeTurnstile: false })
   if (result.error) return null
   if (result.data && result.data.version) {
     VERSION.value = result.data.version
   }
+  LAST_WORKERS_VERSION.value = result.data?.last_workers_version || ''
+  LAST_AGENT_VERSION.value = result.data?.last_agent_version || ''
   return result.data
 }
 

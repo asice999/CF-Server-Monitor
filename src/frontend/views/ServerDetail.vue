@@ -31,10 +31,14 @@
       <div class="host-card-header">
         <div class="host-name">
           <span class="prompt">root@</span>
-          <span v-if="server.region && server.region !== 'xx'">
-          <img :src="getPublicAssetUrl('flags/' + getFlagRegionCode(server.region) + '.svg')" :alt="server.region" class="flag-img" style="margin-right:6px;">
-        </span>
-          <span v-else>🏳️</span>
+          <span v-if="server.region && server.region !== 'xx'" class="country-os-icons">
+            <img :src="getPublicAssetUrl('flags/' + getFlagRegionCode(server.region) + '.svg')" :alt="server.region" class="flag-img">
+            <OsIcon :os="server.os" />
+          </span>
+          <span v-else class="country-os-icons">
+            <span class="flag-fallback">🏳️</span>
+            <OsIcon :os="server.os" />
+          </span>
           <span>{{ server.name || 'Loading...' }}</span>
           <span style="color: var(--text-muted);">:~#</span>
         </div>
@@ -231,10 +235,10 @@
             {{ trans.latencyMonitor }}
           </span>
           <div class="ping-indicator">
-            <span class="ping-ct">{{ trans.pingCt }} <b>{{ formatPing(server.ping_ct) }}</b></span>
-            <span class="ping-cu">{{ trans.pingCu }} <b>{{ formatPing(server.ping_cu) }}</b></span>
-            <span class="ping-cm">{{ trans.pingCm }} <b>{{ formatPing(server.ping_cm) }}</b></span>
-            <span class="ping-bd">{{ trans.pingBd }} <b>{{ formatPing(server.ping_bd) }}</b></span>
+            <span class="ping-ct">{{ trans.pingCt }} <b>{{ avgPingCt !== null ? avgPingCt + 'ms' : 'Timeout' }}</b></span>
+            <span class="ping-cu">{{ trans.pingCu }} <b>{{ avgPingCu !== null ? avgPingCu + 'ms' : 'Timeout' }}</b></span>
+            <span class="ping-cm">{{ trans.pingCm }} <b>{{ avgPingCm !== null ? avgPingCm + 'ms' : 'Timeout' }}</b></span>
+            <span class="ping-bd">{{ trans.pingBd }} <b>{{ avgPingBd !== null ? avgPingBd + 'ms' : 'Timeout' }}</b></span>
           </div>
         </div>
         <div class="chart-body">
@@ -249,10 +253,10 @@
             {{ trans.packetLoss || 'Packet Loss' }}
           </span>
           <div class="ping-indicator">
-            <span v-if="isLossValid(server.loss_ct)" class="ping-ct">{{ trans.pingCt }} <b>{{ formatLoss(server.loss_ct) }}</b></span>
-            <span v-if="isLossValid(server.loss_cu)" class="ping-cu">{{ trans.pingCu }} <b>{{ formatLoss(server.loss_cu) }}</b></span>
-            <span v-if="isLossValid(server.loss_cm)" class="ping-cm">{{ trans.pingCm }} <b>{{ formatLoss(server.loss_cm) }}</b></span>
-            <span v-if="isLossValid(server.loss_bd)" class="ping-bd">{{ trans.pingBd }} <b>{{ formatLoss(server.loss_bd) }}</b></span>
+            <span v-if="avgLossCt !== null" class="ping-ct">{{ trans.pingCt }} <b>{{ avgLossCt }}%</b></span>
+            <span v-if="avgLossCu !== null" class="ping-cu">{{ trans.pingCu }} <b>{{ avgLossCu }}%</b></span>
+            <span v-if="avgLossCm !== null" class="ping-cm">{{ trans.pingCm }} <b>{{ avgLossCm }}%</b></span>
+            <span v-if="avgLossBd !== null" class="ping-bd">{{ trans.pingBd }} <b>{{ avgLossBd }}%</b></span>
           </div>
         </div>
         <div class="chart-body">
@@ -287,6 +291,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TerminalHeader from '../components/TerminalHeader.vue'
 import Footer from '../components/Footer.vue'
+import OsIcon from '../components/OsIcon.vue'
 import { fetchServerDetail, fetchAllHistory, formatBytes, isAdminLoggedIn, createLiveSocket, getFlagRegionCode, isServerOnline } from '../utils/api.js'
 import { hasMultipleApiBases, getPublicAssetUrl } from '../utils/config.js'
 import Chart from 'chart.js/auto'
@@ -395,6 +400,14 @@ const historyLoaded = ref(false)
 const charts = {}
 const chartsReady = ref(false)
 const hasLossHistoryData = ref(false)
+const avgPingCt = ref(null)
+const avgPingCu = ref(null)
+const avgPingCm = ref(null)
+const avgPingBd = ref(null)
+const avgLossCt = ref(null)
+const avgLossCu = ref(null)
+const avgLossCm = ref(null)
+const avgLossBd = ref(null)
 let isInitializingCharts = false
 let databaseUpgradeAlertShown = false
 
@@ -807,6 +820,19 @@ const loadAllHistory = async (hours) => {
       updateChartDataset(charts.loss, 2, allData, fieldAccessor('loss_cm', true))
       updateChartDataset(charts.loss, 3, allData, fieldAccessor('loss_bd', true))
       updateLoadChart(charts.load, allData)
+
+      const avg = (arr, field, skipZero = true) => {
+        const vals = arr.map(d => parseFloat(d[field])).filter(v => !isNaN(v) && (skipZero ? v !== 0 : true))
+        return vals.length ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length) : null
+      }
+      avgPingCt.value = avg(allData, 'ping_ct')
+      avgPingCu.value = avg(allData, 'ping_cu')
+      avgPingCm.value = avg(allData, 'ping_cm')
+      avgPingBd.value = avg(allData, 'ping_bd')
+      avgLossCt.value = avg(allData, 'loss_ct', false)
+      avgLossCu.value = avg(allData, 'loss_cu', false)
+      avgLossCm.value = avg(allData, 'loss_cm', false)
+      avgLossBd.value = avg(allData, 'loss_bd', false)
     }
 
     updateAllChartTimeUnits(hours)

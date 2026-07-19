@@ -1,12 +1,14 @@
 #!/bin/bash
 # ==============================================================================
-# V1.2.0
+# V1.3.1
 # CF-Server-Monitor 安装/卸载脚本 (企业级安全加固版)
 # 支持: Ubuntu/Debian/CentOS/RHEL/Fedora/Rocky/AlmaLinux
 # Fixes: 1. 独立协程无 wait 阻塞 2. 原子化原子覆盖 3. 兼容全版本 Systemd 4. 严格 set -u 闭环
 # ==============================================================================
 
 set -euo pipefail
+
+AGENT_VERSION="1.3.1"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -27,6 +29,7 @@ OLD_TRAFFIC_DATA_FILE="/var/lib/cf-probe/traffic.dat"
 MAX_TRAFFIC_CORRECTION_GB=1000000
 CONTAINER_PID_FILE="/run/cf-probe.pid"
 CONTAINER_LOG_FILE="/var/log/cf-probe.log"
+DEBUG_ENV_FILE="/run/cf-probe-debug.env"
 
 # 全局运行模式: systemd | container
 RUNTIME_MODE="systemd"
@@ -60,9 +63,10 @@ print_usage() {
     echo "  -cm=HOST       自定义CM测试节点"
     echo "  -bd=HOST       自定义BD测试节点"
     echo "  -reset_day=N   流量重置日(1-31, 0=不重置)，默认1"
+    echo "  -auto_update=0|1 自动更新探针，默认0"
     echo "  -rx_correction=N  下行流量校正(GB)，覆盖当月下行数据"
     echo "  -tx_correction=N  上行流量校正(GB)，覆盖当月上行数据"
-    echo "  -debug=1       输出上报调试日志，默认0"
+    echo "  -debug=0|1     输出上报调试日志，默认0，不写入配置"
     echo ""
     echo "示例:"
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com"
@@ -74,10 +78,12 @@ print_usage() {
     exit 1
 }
 
-normalize_debug_mode() {
-    case "${1:-0}" in
-        1|true|TRUE|yes|YES|on|ON) echo "1" ;;
-        *) echo "0" ;;
+normalize_binary_value() {
+    local value="${1-}" default_value="${2-}"
+    [ -z "$value" ] && value="$default_value"
+    case "$value" in
+        0|1) printf '%s' "$value" ;;
+        *) return 1 ;;
     esac
 }
 
@@ -131,20 +137,20 @@ detect_os() {
 
 install_deps() {
     step "检查系统依赖组件..."
-    local required_cmds=("curl" "awk" "grep" "sed" "ps" "df" "ping" "nc")
+    local required_cmds="curl awk grep sed ps df ping nc"
 
-    for cmd in "${required_cmds[@]}"; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            warn "缺少必要依赖: $cmd，正在尝试自动安装..."
-            local pkg="$cmd"
-            if [ "$cmd" = "ping" ]; then
+    for cmd in ${required_cmds}; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            warn "缺少必要依赖: ${cmd}，正在尝试自动安装..."
+            local pkg="${cmd}"
+            if [ "${cmd}" = "ping" ]; then
                 if [ "${PKG_MGR:-apt-get}" = "apt-get" ]; then
                     pkg="iputils-ping"
                 else
                     pkg="iputils"
                 fi
             fi
-            if [ "$cmd" = "nc" ]; then
+            if [ "${cmd}" = "nc" ]; then
                 case "${PKG_MGR:-apt-get}" in
                     apt-get) pkg="netcat-openbsd" ;;
                     yum)     pkg="nmap-ncat" ;;
@@ -152,15 +158,15 @@ install_deps() {
                 esac
             fi
             case "${PKG_MGR:-apt-get}" in
-                apt-get) apt-get update -qq && apt-get install -y -qq "$pkg" >/dev/null 2>&1 || true ;;
-                yum)     yum install -y -q "$pkg" >/dev/null 2>&1 || true ;;
-                apk)     apk add --no-cache --quiet "$pkg" >/dev/null 2>&1 || true ;;
-                opkg)    opkg install "$pkg" >/dev/null 2>&1 || true ;;
-                *)       warn "未知的包管理器: ${PKG_MGR:-apt-get}，无法自动安装 $pkg" ;;
+                apt-get) apt-get update -qq && apt-get install -y -qq "${pkg}" >/dev/null 2>&1 || true ;;
+                yum)     yum install -y -q "${pkg}" >/dev/null 2>&1 || true ;;
+                apk)     apk add --no-cache --quiet "${pkg}" >/dev/null 2>&1 || true ;;
+                opkg)    opkg install "${pkg}" >/dev/null 2>&1 || true ;;
+                *)       warn "未知的包管理器: ${PKG_MGR:-apt-get}，无法自动安装 ${pkg}" ;;
             esac
         fi
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            error "无法自动安装依赖 [$cmd]，请手动安装后重试。"
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            error "无法自动安装依赖 [${cmd}]，请手动安装后重试。"
         fi
     done
 
@@ -194,14 +200,27 @@ stop_old_service() {
 create_script() {
     step "注入工业级监控采集探针..."
 
-    cat > "${SCRIPT_FILE}" << 'PROBE_EOF'
+    cat << 'PROBE_EOF' | sed "s|__AGENT_VERSION__|${AGENT_VERSION}|g" > "${SCRIPT_FILE}"
 #!/bin/bash
 set +eu
 
+AGENT_VERSION="__AGENT_VERSION__"
+SERVICE_NAME="cf-probe"
 CONFIG_DIR="/etc/config/cf-probe"
 CONFIG_FILE="${CONFIG_DIR}/config.conf"
 TRAFFIC_DATA_FILE="${CONFIG_DIR}/traffic.dat"
 MAX_TRAFFIC_CORRECTION_GB=1000000
+DEBUG_MODE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -debug=*) DEBUG_MODE="${arg#-debug=}" ;;
+    esac
+done
+case "$DEBUG_MODE" in
+    0|1) ;;
+    *) DEBUG_MODE=0 ;;
+esac
 
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "[ERROR] 配置文件不存在: ${CONFIG_FILE}"
@@ -220,17 +239,17 @@ while IFS='=' read -r key value; do
         CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
         BD_NODE) BD_NODE="${value%\"}"; BD_NODE="${BD_NODE#\"}" ;;
         RESET_DAY) RESET_DAY="${value%\"}"; RESET_DAY="${RESET_DAY#\"}" ;;
-        DEBUG_MODE) DEBUG_MODE="${value%\"}"; DEBUG_MODE="${DEBUG_MODE#\"}" ;;
+        AUTO_UPDATE) AUTO_UPDATE="${value%\"}"; AUTO_UPDATE="${AUTO_UPDATE#\"}" ;;
         CONFIG_MD5) CONFIG_MD5="${value%\"}"; CONFIG_MD5="${CONFIG_MD5#\"}" ;;
     esac
 done < "${CONFIG_FILE}"
 
 COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
 REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-DEBUG_MODE=${DEBUG_MODE:-0}
-case "$DEBUG_MODE" in
-    1|true|TRUE|yes|YES|on|ON) DEBUG_MODE=1 ;;
-    *) DEBUG_MODE=0 ;;
+AUTO_UPDATE=${AUTO_UPDATE:-0}
+case "$AUTO_UPDATE" in
+    0|1) ;;
+    *) AUTO_UPDATE=0 ;;
 esac
 [ -z "$RESET_DAY" ] && RESET_DAY=1
 case "$COLLECT_INTERVAL" in ''|*[!0-9]*) COLLECT_INTERVAL=0 ;; esac
@@ -284,6 +303,78 @@ rotate_log_if_needed() {
     rm -f "$_tmp" 2>/dev/null || true
 }
 
+get_install_url() {
+    local url rest origin
+    url="${WORKER_URL%%\?*}"
+    case "$url" in
+        http://*)
+            rest="${url#http://}"
+            origin="http://${rest%%/*}"
+            ;;
+        https://*)
+            rest="${url#https://}"
+            origin="https://${rest%%/*}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    case "$origin" in
+        http://|https://) return 1 ;;
+    esac
+    printf '%s/install.sh' "$origin"
+}
+
+schedule_agent_update() {
+    if [ "${AUTO_UPDATE}" != "1" ]; then
+        log_warn_debug "Auto update ignored: local AUTO_UPDATE=${AUTO_UPDATE}"
+        return 0
+    fi
+
+    local now last lock_file install_url systemd_output systemd_status
+    lock_file="${CONFIG_DIR}/auto_update.lock"
+
+    now=$(date +%s)
+    if [ -f "$lock_file" ]; then
+        last=$(cat "$lock_file" 2>/dev/null || echo 0)
+        case "$last" in ''|*[!0-9]*) last=0 ;; esac
+        if [ $((now - last)) -lt 1800 ]; then
+            log_warn_debug "Auto update already scheduled recently: age=$((now - last))s lock=${lock_file}"
+            return 0
+        fi
+    fi
+
+    mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
+    if ! install_url=$(get_install_url); then
+        log_warn_debug "Auto update skipped: invalid WORKER_URL=${WORKER_URL}"
+        return 1
+    fi
+    log_debug "Auto update requested: install_url=${install_url}"
+
+    if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
+        systemd_output=$(systemd-run --unit="${SERVICE_NAME}-auto-update-${now}" /bin/bash -c 'set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" 2>&1)
+        systemd_status=$?
+        if [ "$systemd_status" -eq 0 ]; then
+            printf '%s\n' "$now" > "$lock_file" 2>/dev/null || true
+            log_info "Auto update scheduled via systemd-run: unit=${SERVICE_NAME}-auto-update-${now}"
+            log_debug "systemd-run output: ${systemd_output}"
+            return 0
+        fi
+        log_warn_debug "Auto update systemd-run failed: status=${systemd_status} output=${systemd_output}"
+    fi
+
+    if [ -d /run/systemd/system ]; then
+        log_warn_debug "Auto update scheduling failed: systemd-run unavailable"
+        return 1
+    fi
+
+    log_debug "Auto update scheduling via nohup: install_url=${install_url}"
+    nohup /bin/bash -c 'set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" >/dev/null 2>&1 &
+    printf '%s\n' "$now" > "$lock_file" 2>/dev/null || true
+    log_info "Auto update scheduled"
+    return 0
+}
+
 persist_dynamic_config() {
     local tmp_file="${CONFIG_FILE}.tmp.$$"
     awk \
@@ -323,19 +414,23 @@ persist_dynamic_config() {
 apply_remote_config() {
     local response_file="$1" header_file="$2" body bytes new_md5
     local new_collect new_report new_reset new_schema new_ct new_cu new_cm new_bd
-    local new_rx_corr new_tx_corr
+    local new_rx_corr new_tx_corr new_update has_config
 
     bytes=$(wc -c < "$response_file" 2>/dev/null || echo 9999)
-    [ "$bytes" -le 1024 ] || return 1
+    if [ "$bytes" -gt 1024 ]; then
+        log_warn_debug "Remote config rejected: response too large bytes=${bytes}"
+        return 1
+    fi
     body=$(cat "$response_file" 2>/dev/null) || return 1
-    case "$body" in ''|*[!a-z0-9_=\&.\-]*) return 1 ;; esac
-
-    new_md5=$(awk 'tolower($1)=="x-agent-config-md5:" { gsub("\r", "", $2); print tolower($2); exit }' "$header_file")
-    [ "${#new_md5}" -eq 32 ] || return 1
-    case "$new_md5" in *[!0-9a-f]*) return 1 ;; esac
+    log_debug "Remote config raw: bytes=${bytes} body=${body}"
+    case "$body" in
+        '') log_warn_debug "Remote config rejected: empty body"; return 1 ;;
+        *[!a-z0-9_=\&.\-:]*) log_warn_debug "Remote config rejected: invalid characters body=${body}"; return 1 ;;
+    esac
 
     new_rx_corr=""
     new_tx_corr=""
+    new_update=""
     IFS='&' read -ra _fields <<< "$body"
     for _f in "${_fields[@]}"; do
         _k="${_f%%=*}"; _v="${_f#*=}"
@@ -350,14 +445,48 @@ apply_remote_config() {
             custom_bd)        new_bd="$_v" ;;
             rx_correction)    new_rx_corr="$_v" ;;
             tx_correction)    new_tx_corr="$_v" ;;
+            update)           new_update="$_v" ;;
+            '')               ;;
+            *)                log_warn_debug "Remote config rejected: unknown field=${_k}"; return 1 ;;
         esac
     done
 
-    case "$new_collect" in 0|1|2|5|10) ;; *) return 1 ;; esac
-    case "$new_report" in 30|60|120|180) ;; *) return 1 ;; esac
-    case "$new_reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) return 1 ;; esac
-    [ "$new_schema" = "2" ] || return 1
-    [ "$new_report" -ge "$new_collect" ] || return 1
+    has_config=0
+    if [ -n "${new_collect:-}" ] || [ -n "${new_report:-}" ] || [ -n "${new_reset:-}" ] || [ -n "${new_schema:-}" ]; then
+        has_config=1
+    fi
+    log_debug "Remote config parsed: has_config=${has_config} update=${new_update:-} collect=${new_collect:-} report=${new_report:-} reset=${new_reset:-} schema=${new_schema:-} rx_corr=${new_rx_corr:-} tx_corr=${new_tx_corr:-}"
+
+    if [ "$has_config" = "0" ]; then
+        if [ "$new_update" = "1" ]; then
+            log_debug "Remote update-only instruction received"
+            schedule_agent_update
+            return 0
+        fi
+        log_warn_debug "Remote config rejected: no config fields and update=${new_update:-}"
+        return 1
+    fi
+
+    new_md5=$(awk 'tolower($1)=="x-agent-config-md5:" { gsub("\r", "", $2); print tolower($2); exit }' "$header_file")
+    if [ "${#new_md5}" -ne 32 ]; then
+        log_warn_debug "Remote config rejected: invalid md5 length md5=${new_md5:-}"
+        return 1
+    fi
+    case "$new_md5" in *[!0-9a-f]*) log_warn_debug "Remote config rejected: invalid md5 chars md5=${new_md5}"; return 1 ;; esac
+    log_debug "Remote config md5: current=${CONFIG_MD5:-none} remote=${new_md5}"
+
+    case "$new_collect" in 0|1|2|5|10) ;; *) log_warn_debug "Remote config rejected: invalid collect_interval=${new_collect:-}"; return 1 ;; esac
+    case "$new_report" in 30|60|120|180) ;; *) log_warn_debug "Remote config rejected: invalid report_interval=${new_report:-}"; return 1 ;; esac
+    case "$new_reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) log_warn_debug "Remote config rejected: invalid reset_day=${new_reset:-}"; return 1 ;; esac
+    case "$new_update" in ''|0|1) ;; *) log_warn_debug "Remote config rejected: invalid update=${new_update}"; return 1 ;; esac
+    if [ "$new_schema" != "2" ]; then
+        log_warn_debug "Remote config rejected: invalid schema_version=${new_schema:-}"
+        return 1
+    fi
+    if [ "$new_report" -lt "$new_collect" ]; then
+        log_warn_debug "Remote config rejected: report_interval=${new_report} less than collect_interval=${new_collect}"
+        return 1
+    fi
 
     if [ "$new_md5" != "${CONFIG_MD5:-none}" ]; then
         persist_dynamic_config "$new_collect" "$new_report" "$new_reset" "$new_md5" "$new_ct" "$new_cu" "$new_cm" "$new_bd" || return 1
@@ -394,6 +523,12 @@ apply_remote_config() {
             send_correction_confirm "$new_rx_corr" "$new_tx_corr" || true
         fi
     fi
+
+    if [ "$new_update" = "1" ]; then
+        log_debug "Remote config includes update=1"
+        schedule_agent_update || true
+    fi
+    return 0
 }
 
 normalize_correction_value() {
@@ -699,22 +834,52 @@ get_tcp_ping_nc() {
     return 1
 }
 
+split_probe_target() {
+    local target="${1:-}"
+    local default_port="${2:-443}"
+    local probe_host="$target"
+    local probe_port="$default_port"
+
+    case "$target" in
+        ''|*[!A-Za-z0-9._:-]*) return 1 ;;
+        *:*)
+            case "${target#*:}" in *:*) return 1 ;; esac
+            probe_host="${target%:*}"
+            probe_port="${target##*:}"
+            ;;
+    esac
+
+    case "$probe_host" in ''|-*) return 1 ;; esac
+    case "$probe_port" in ''|*[!0-9]*|??????*) return 1 ;; esac
+    [ "$probe_port" -ge 1 ] && [ "$probe_port" -le 65535 ] || return 1
+
+    echo "${probe_host} ${probe_port}"
+    return 0
+}
+
 # 统一4探针：同时计算延迟(avg RTT)和丢包率(%)，输出格式 "RTT LOSS"
 get_probe() {
-    local host="${1:-}"
+    local target="${1:-}"
     local count="${2:-4}"
     local port="${3:-443}"
 
-    if [ -z "$host" ]; then
+    if [ -z "$target" ]; then
         echo "null 100"
         return
     fi
+
+    local host probe_target
+    if ! probe_target=$(split_probe_target "$target" "$port"); then
+        echo "null 100"
+        return
+    fi
+    host="${probe_target% *}"
+    port="${probe_target##* }"
 
     if has_nc_zero_io && get_time_ms >/dev/null 2>&1; then
         local ok=0 total_rtt=0 i=1 rtt
         while [ "$i" -le "$count" ]; do
             rtt=$(get_tcp_ping_nc "$host" "$port" 2>/dev/null)
-            log_debug "[get_probe] $host probe $i/$count: rtt=$rtt"
             if [ -n "$rtt" ]; then
                 ok=$((ok + 1))
                 total_rtt=$((total_rtt + rtt))
@@ -765,12 +930,12 @@ write_probe_result() {
     fi
 }
 
+# Centos限制，所以改成串行执行
 refresh_probe_async() {
-    [ -n "$CT_NODE" ] && write_probe_result /dev/shm/.cf_probe_ct get_probe "$CT_NODE" 4 443 &
-    [ -n "$CU_NODE" ] && write_probe_result /dev/shm/.cf_probe_cu get_probe "$CU_NODE" 4 443 &
-    [ -n "$CM_NODE" ] && write_probe_result /dev/shm/.cf_probe_cm get_probe "$CM_NODE" 4 443 &
-    [ -n "$BD_NODE" ] && write_probe_result /dev/shm/.cf_probe_bd get_probe "$BD_NODE" 4 443 &
-    wait
+    [ -n "$CT_NODE" ] && write_probe_result /dev/shm/.cf_probe_ct get_probe "$CT_NODE" 4 443
+    [ -n "$CU_NODE" ] && write_probe_result /dev/shm/.cf_probe_cu get_probe "$CU_NODE" 4 443
+    [ -n "$CM_NODE" ] && write_probe_result /dev/shm/.cf_probe_cm get_probe "$CM_NODE" 4 443
+    [ -n "$BD_NODE" ] && write_probe_result /dev/shm/.cf_probe_bd get_probe "$BD_NODE" 4 443
 }
 
 # ==============================================================================
@@ -781,6 +946,10 @@ run_network_worker() {
     set -eu
     local last_ip=0
     local last_probe=0
+    local probe_interval="${REPORT_INTERVAL:-60}"
+    case "$probe_interval" in ''|*[!0-9]*) probe_interval=60 ;; esac
+    [ "$probe_interval" -lt 30 ] && probe_interval=30
+    [ "$probe_interval" -gt 60 ] && probe_interval=60
     
     while true; do
         local now; now=$(date +%s)
@@ -792,8 +961,8 @@ run_network_worker() {
             last_ip="$now"
         fi
         
-        # 30秒统一探测：一次探测同时计算延迟和丢包率
-        if [ $((now - last_probe)) -ge 30 ] || [ "$last_probe" -eq 0 ]; then
+        # 统一探测：跟随上报间隔并限制在 30-60 秒，一次探测同时计算延迟和丢包率
+        if [ $((now - last_probe)) -ge "$probe_interval" ] || [ "$last_probe" -eq 0 ]; then
             refresh_probe_async
             last_probe="$now"
         fi
@@ -818,7 +987,7 @@ if [ -z "${SERVER_ID:-}" ] || [ -z "${SECRET:-}" ] || [ -z "${WORKER_URL:-}" ]; 
 fi
 
 log_info "CF-Server-Monitor Probe Engine Started Successfully."
-log_debug "Config: id=${SERVER_ID} url=${WORKER_URL} report_interval=${REPORT_INTERVAL}s collect_interval=${COLLECT_INTERVAL}s active_interval=${ACTIVE_INTERVAL}s reset_day=${RESET_DAY} secret_len=${#SECRET}"
+log_debug "Config: id=${SERVER_ID} url=${WORKER_URL} report_interval=${REPORT_INTERVAL}s collect_interval=${COLLECT_INTERVAL}s active_interval=${ACTIVE_INTERVAL}s reset_day=${RESET_DAY} auto_update=${AUTO_UPDATE} secret_len=${#SECRET}"
 log_debug "Nodes: ct=${CT_NODE:-} cu=${CU_NODE:-} cm=${CM_NODE:-} bd=${BD_NODE:-}"
 
 # 核心架构升级：在这里脱离主循环，静默启动常驻网络 Worker 协程，无 wait 干扰
@@ -1019,15 +1188,19 @@ EOF
         REPORT_RESPONSE_FILE="/dev/shm/.cf_probe_response.$$"
         REPORT_HEADER_FILE="/dev/shm/.cf_probe_headers.$$"
         REPORT_ERROR_FILE="/dev/shm/.cf_probe_error.$$"
+        REPORT_HEADERS=""
         REPORT_HTTP_CODE=$(curl -sS -D "$REPORT_HEADER_FILE" -o "$REPORT_RESPONSE_FILE" -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "X-Agent-Config-Schema: 2" \
+            -H "X-Agent-Version: ${AGENT_VERSION}" \
             -H "X-Agent-Config-Md5: ${CONFIG_MD5:-none}" \
             -d "$PAYLOAD" -m 8 --connect-timeout 3 "$WORKER_URL" 2>"$REPORT_ERROR_FILE")
         REPORT_CURL_EXIT=$?
         case "$REPORT_HTTP_CODE" in ''|*[!0-9]*) REPORT_HTTP_CODE=000 ;; esac
         REPORT_RESPONSE=$(head -c 300 "$REPORT_RESPONSE_FILE" 2>/dev/null | tr '\r\n' '  ')
+        REPORT_HEADERS=$(head -c 500 "$REPORT_HEADER_FILE" 2>/dev/null | tr '\r\n' '  ')
         REPORT_ERROR=$(head -c 300 "$REPORT_ERROR_FILE" 2>/dev/null | tr '\r\n' '  ')
+        log_debug "Report response: http=${REPORT_HTTP_CODE} curl_exit=${REPORT_CURL_EXIT} headers=${REPORT_HEADERS} body=${REPORT_RESPONSE}"
         if [ "$REPORT_CURL_EXIT" -ne 0 ] || [ "$REPORT_HTTP_CODE" -lt 200 ] || [ "$REPORT_HTTP_CODE" -ge 300 ]; then
             log_warn_debug "Report failed: curl_exit=${REPORT_CURL_EXIT} http=${REPORT_HTTP_CODE} samples=${SAMPLE_COUNT} payload_bytes=${PAYLOAD_BYTES} response=${REPORT_RESPONSE} error=${REPORT_ERROR}"
         else
@@ -1063,7 +1236,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash "${SCRIPT_FILE}"
+Environment=CF_PROBE_DEBUG=0
+EnvironmentFile=-${DEBUG_ENV_FILE}
+ExecStart=/bin/bash "${SCRIPT_FILE}" -debug=\${CF_PROBE_DEBUG}
 Restart=always
 RestartSec=5
 User=root
@@ -1083,6 +1258,20 @@ WantedBy=multi-user.target
 EOF
 
     info "Systemd 守护配置文件生成成功: ${SERVICE_FILE}"
+}
+
+apply_debug_runtime_env() {
+    [ "$RUNTIME_MODE" != "systemd" ] && return
+
+    if [ "${DEBUG_MODE:-0}" = "1" ]; then
+        if mkdir -p /run 2>/dev/null && printf 'CF_PROBE_DEBUG=1\n' > "${DEBUG_ENV_FILE}" 2>/dev/null; then
+            chmod 600 "${DEBUG_ENV_FILE}" 2>/dev/null || true
+        else
+            warn "调试日志运行参数写入失败，将按默认值 0 启动"
+        fi
+    else
+        rm -f "${DEBUG_ENV_FILE}" 2>/dev/null || true
+    fi
 }
 
 start_service() {
@@ -1108,7 +1297,7 @@ start_service() {
 
         mkdir -p /var/log 2>/dev/null || true
 
-        nohup bash "${SCRIPT_FILE}" >> "${CONTAINER_LOG_FILE}" 2>&1 &
+        nohup bash "${SCRIPT_FILE}" -debug="${DEBUG_MODE}" >> "${CONTAINER_LOG_FILE}" 2>&1 &
         local pid=$!
         echo "$pid" > "${CONTAINER_PID_FILE}"
 
@@ -1132,6 +1321,7 @@ install_probe() {
     CM_NODE=""
     BD_NODE=""
     RESET_DAY=""
+    AUTO_UPDATE=""
     RX_CORRECTION=""
     TX_CORRECTION=""
     DEBUG_MODE=""
@@ -1149,9 +1339,10 @@ install_probe() {
             -cm=*) CM_NODE="${arg#-cm=}" ;;
             -bd=*) BD_NODE="${arg#-bd=}" ;;
             -reset_day=*) RESET_DAY="${arg#-reset_day=}" ;;
+            -auto_update=*|-auto-update=*) AUTO_UPDATE=$(normalize_binary_value "${arg#*=}") || error "auto_update 参数非法，仅支持 0 或 1" ;;
             -rx_correction=*) RX_CORRECTION="${arg#-rx_correction=}" ;;
             -tx_correction=*) TX_CORRECTION="${arg#-tx_correction=}" ;;
-            -debug=*) DEBUG_MODE="${arg#-debug=}" ;;
+            -debug=*) DEBUG_MODE=$(normalize_binary_value "${arg#-debug=}") || error "debug 参数非法，仅支持 0 或 1" ;;
         esac
     done
 
@@ -1169,7 +1360,8 @@ install_probe() {
             COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
             REPORT_INTERVAL=${REPORT_INTERVAL:-60}
             [ -z "$RESET_DAY" ] && RESET_DAY=1
-            DEBUG_MODE=$(normalize_debug_mode "${DEBUG_MODE:-0}")
+            AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
+            DEBUG_MODE=$(normalize_binary_value "$DEBUG_MODE" 0) || error "debug 参数非法，仅支持 0 或 1"
 
             step "更新配置文件..."
             cat > "${CONFIG_FILE}" << EOF
@@ -1183,6 +1375,7 @@ CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
 BD_NODE="${BD_NODE:-}"
 RESET_DAY="${RESET_DAY}"
+AUTO_UPDATE="${AUTO_UPDATE}"
 CONFIG_MD5="none"
 EOF
             chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
@@ -1201,6 +1394,7 @@ EOF
                     CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
                     BD_NODE) BD_NODE="${value%\"}"; BD_NODE="${BD_NODE#\"}" ;;
                     RESET_DAY) RESET_DAY="${value%\"}"; RESET_DAY="${RESET_DAY#\"}" ;;
+                    AUTO_UPDATE) AUTO_UPDATE="${value%\"}"; AUTO_UPDATE="${AUTO_UPDATE#\"}" ;;
                     CONFIG_MD5) CONFIG_MD5="${value%\"}"; CONFIG_MD5="${CONFIG_MD5#\"}" ;;
                 esac
             done < "${CONFIG_FILE}"
@@ -1213,7 +1407,8 @@ EOF
         COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
         REPORT_INTERVAL=${REPORT_INTERVAL:-60}
         [ -z "$RESET_DAY" ] && RESET_DAY=1
-        DEBUG_MODE=$(normalize_debug_mode "${DEBUG_MODE:-0}")
+        AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
+        DEBUG_MODE=$(normalize_binary_value "$DEBUG_MODE" 0) || error "debug 参数非法，仅支持 0 或 1"
 
         step "创建配置目录..."
         mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
@@ -1240,6 +1435,7 @@ CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
 BD_NODE="${BD_NODE:-}"
 RESET_DAY="${RESET_DAY}"
+AUTO_UPDATE="${AUTO_UPDATE}"
 CONFIG_MD5="none"
 EOF
         chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
@@ -1248,7 +1444,8 @@ EOF
 
     COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
     REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-    DEBUG_MODE=$(normalize_debug_mode "${DEBUG_MODE:-0}")
+    AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
+    DEBUG_MODE=$(normalize_binary_value "$DEBUG_MODE" 0) || error "debug 参数非法，仅支持 0 或 1"
     CONFIG_MD5=${CONFIG_MD5:-none}
 
     if [ -n "${RX_CORRECTION}" ] || [ -n "${TX_CORRECTION}" ]; then
@@ -1277,11 +1474,12 @@ EOF
 
     create_script
     create_service
+    apply_debug_runtime_env
     start_service
 
-    echo -e "\n${GREEN}============================================="
-    echo -e "         CF-Server-Monitor 安装成功"
-    echo -e "=============================================${NC}"
+    echo -e "\n${GREEN}======================================================="
+    echo -e "         CF-Server-Monitor ${AGENT_VERSION} 安装成功"
+    echo -e "=======================================================${NC}"
     echo -e "  服务状态 : ${GREEN}Active (Running)${NC}"
     echo -e "  配置参数 :"
     echo -e "    ● Server ID   : ${SERVER_ID}"
@@ -1289,6 +1487,7 @@ EOF
     echo -e "    ● Worker URL  : ${WORKER_URL}"
     echo -e "    ● 上报间隔    : ${REPORT_INTERVAL}秒"
     printf  '    ● 采样间隔    : %s秒\n' "${COLLECT_INTERVAL}"
+    echo -e "    ● 自动更新    : ${AUTO_UPDATE}"
     echo -e "    ● 调试日志    : ${DEBUG_MODE}"
     [ -n "${RX_CORRECTION}" ] && echo -e "    ● 下行校正    : ${RX_CORRECTION}GB"
     [ -n "${TX_CORRECTION}" ] && echo -e "    ● 上行校正    : ${TX_CORRECTION}GB"

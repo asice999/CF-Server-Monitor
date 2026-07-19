@@ -17,71 +17,65 @@
         </select>
       </div>
 
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.customCt }}</label>
-          <input type="text" name="custom_ct" autocomplete="off" :value="customCt" class="form-input" placeholder="gd-ct-dualstack.ip.zstaticcdn.com" readonly>
+      <div class="config-list">
+        <div class="config-row">
+          <span class="config-label">{{ trans.collectInterval }}</span>
+          <span class="config-value">{{ formatWithUnit(collectInterval, 's') }}</span>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.customCu }}</label>
-          <input type="text" name="custom_cu" autocomplete="off" :value="customCu" class="form-input" placeholder="gd-cu-dualstack.ip.zstaticcdn.com" readonly>
+        <div class="config-row">
+          <span class="config-label">{{ trans.reportInterval }}</span>
+          <span class="config-value">{{ formatWithUnit(reportInterval, 's') }}</span>
         </div>
-      </div>
-
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.customCm }}</label>
-          <input type="text" name="custom_cm" autocomplete="off" :value="customCm" class="form-input" placeholder="gd-cm-dualstack.ip.zstaticcdn.com" readonly>
+        <div class="config-row">
+          <span class="config-label">{{ trans.trafficResetDay }}</span>
+          <span class="config-value">{{ isBlank(resetDay) ? '-' : resetDay }}</span>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.customBd }}</label>
-          <input type="text" name="custom_bd" autocomplete="off" :value="customBd" class="form-input" placeholder="lf3-ips.zstaticcdn.com" readonly>
+        <div class="config-row">
+          <span class="config-label">{{ trans.autoUpdate }}</span>
+          <span class="config-value">
+            <span :class="['config-badge', autoUpdate ? 'is-enabled' : 'is-disabled']">
+              {{ autoUpdate ? trans.enabled : trans.disabled }}
+            </span>
+          </span>
         </div>
-      </div>
-
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.collectInterval }}</label>
-          <div class="flex items-center gap-2">
-            <input type="text" readonly :value="collectInterval" class="form-input">
-          </div>
+        <div class="config-row">
+          <span class="config-label">{{ trans.customCt }}</span>
+          <span class="config-value">{{ isBlank(customCt) ? '-' : customCt }}</span>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.reportInterval }}</label>
-          <div class="flex items-center gap-2">
-            <input type="text" readonly :value="reportInterval" class="form-input">
-          </div>
+        <div class="config-row">
+          <span class="config-label">{{ trans.customCu }}</span>
+          <span class="config-value">{{ isBlank(customCu) ? '-' : customCu }}</span>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.trafficResetDay }}</label>
-          <div class="flex items-center gap-2">
-            <input type="text" readonly :value="resetDay" class="form-input">
-            <button @click="$emit('open-edit-from-copy')" class="btn btn-icon btn-blue" :title="trans.edit">✏️</button>
-          </div>
+        <div class="config-row">
+          <span class="config-label">{{ trans.customCm }}</span>
+          <span class="config-value">{{ isBlank(customCm) ? '-' : customCm }}</span>
         </div>
-      </div>
-
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.rxCorrection }} (GB)</label>
-          <input type="number" name="rx_correction" autocomplete="off" :value="rxCorrection" class="form-input" placeholder="0" min="0" step="1" readonly>
+        <div class="config-row">
+          <span class="config-label">{{ trans.customBd }}</span>
+          <span class="config-value">{{ isBlank(customBd) ? '-' : customBd }}</span>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.txCorrection }} (GB)</label>
-          <input type="number" name="tx_correction" autocomplete="off" :value="txCorrection" class="form-input" placeholder="0" min="0" step="1" readonly>
+        <div class="config-row">
+          <span class="config-label">{{ trans.rxCorrection }} (GB)</span>
+          <span class="config-value">{{ formatWithUnit(rxCorrection, 'GB') }}</span>
+        </div>
+        <div class="config-row">
+          <span class="config-label">{{ trans.txCorrection }} (GB)</span>
+          <span class="config-value">{{ formatWithUnit(txCorrection, 'GB') }}</span>
         </div>
       </div>
 
       <div class="form-group">
         <label class="form-label">{{ trans.installCommand }}</label>
-        <div class="cmd-input-wrapper" :class="{ copied: copiedCmd }">
+        <div class="cmd-output-wrapper" :class="{ copied: copiedCmd }">
           <span class="cmd-prompt">{{ targetOs === 'windows' ? 'PS' : '$' }}</span>
-          <input type="text" readonly :value="installCommand" class="cmd-input flex-1">
+          <pre class="cmd-output">{{ installCommand }}</pre>
         </div>
       </div>
 
       <div class="modal-footer flex-justify-between">
-        <button @click="$emit('copy-cmd')" class="btn btn-primary">{{ copiedCmd ? '✅ ' + trans.copied : '📋 ' + trans.copy }}</button>
+        <div class="flex items-center gap-2">
+          <button @click="$emit('copy-cmd')" class="btn btn-primary">{{ copiedCmd ? '✅ ' + trans.copied : '📋 ' + trans.copy }}</button> <button @click="$emit('open-edit-from-copy')" class="btn btn-blue">✏️ {{ trans.edit }}</button>
+        </div>
         <button @click="$emit('close')" class="btn">{{ trans.cancel }}</button>
       </div>
     </div>
@@ -103,9 +97,13 @@ defineProps({
   resetDay: { type: [Number, String], default: 1 },
   rxCorrection: { type: [Number, String], default: '' },
   txCorrection: { type: [Number, String], default: '' },
+  autoUpdate: { type: Boolean, default: false },
   installCommand: { type: String, default: '' },
   copiedCmd: { type: Boolean, default: false }
 })
 
 defineEmits(['close', 'copy-cmd', 'open-edit-from-copy', 'update:target-os'])
+
+const isBlank = (value) => value === '' || value === null || value === undefined
+const formatWithUnit = (value, unit) => (isBlank(value) ? '-' : `${value} ${unit}`)
 </script>
