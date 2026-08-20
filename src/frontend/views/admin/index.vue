@@ -39,7 +39,6 @@
               v-if="isMultipleMode"
               v-model.number="selectedApiIndex"
               class="form-select admin-site-select"
-              :title="trans.apiEndpoint"
               :disabled="adminSiteLoading"
               @change="handleAdminApiIndexChange"
             >
@@ -51,6 +50,7 @@
                 [{{ index }}] {{ base }}
               </option>
             </select>
+            <HelpTooltip v-if="isMultipleMode" :text="trans.apiEndpoint" />
             <button @click="logout" class="btn btn-red">🚪 {{ trans.logout }}</button>
           </div>
         </div>
@@ -92,6 +92,11 @@
             :class="{ active: activeTab === 'database' }"
             @click="activeTab = 'database'"
           >▸ {{ trans.dbManagement }}</button>
+          <button
+            class="tab-btn"
+            :class="{ active: activeTab === 'themeStore' }"
+            @click="activeTab = 'themeStore'"
+          >▸ {{ trans.themeStore }}</button>
         </div>
 
         <ServerTable
@@ -103,10 +108,13 @@
           :groups="groups"
           :active-tab="activeTab"
           :selected-api-index="selectedApiIndex"
+          :theme-url="settings.theme_url"
           :latest-agent-version="latestAgentVersion"
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
+          :copied-spec-key="copiedSpecKey"
           @add-server="addServer"
+          @batch-edit="openBatchEditModal"
           @batch-delete="batchDelete"
           @toggle-select-all="toggleSelectAll"
           @select-all="handleSelectAll"
@@ -114,6 +122,7 @@
           @drop="handleDrop"
           @toggle-server="toggleServer"
           @copy-note="copyServerNote"
+          @copy-spec="copyServerSpec"
           @copy-cmd="copyCmd"
           @edit="openEditModal"
           @delete="openDeleteModal"
@@ -123,6 +132,7 @@
           ref="settingsPanelRef"
           :trans="trans"
           :settings="settings"
+          :servers="servers"
           :password-visible="passwordVisible"
           :active-tab="activeTab"
           :selected-api-base="selectedApiBase"
@@ -135,6 +145,7 @@
           @toggle-admin-password-change="toggleAdminPasswordChange"
           @save-settings="saveSettings"
           @upload-bg="uploadBg"
+          @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
           @query-d1-usage="queryD1Usage"
         />
@@ -143,7 +154,19 @@
           :trans="trans"
           :active-tab="activeTab"
           :db-loading="dbLoading"
+          :selected-api-index="selectedApiIndex"
           @open-db-modal="openDbModal"
+        />
+
+        <ThemeStorePanel
+          :trans="trans"
+          :active-tab="activeTab"
+          :selected-api-index="selectedApiIndex"
+          :current-theme-url="settings.theme_url"
+          :settings="settings"
+          @theme-applied="settings.theme_url = $event"
+          @theme-options-applied="handleThemeOptionsApplied"
+          @alert-message="alertMessage = $event"
         />
       </div>
 
@@ -156,6 +179,19 @@
         @save="saveEdit"
         @close="closeEditModal"
         @toggle-auto-update="handleAutoUpdateToggle"
+      />
+
+      <BatchEditServersModal
+        v-model:form="batchEditForm"
+        v-model:enabled="batchEditEnabled"
+        :trans="trans"
+        :show="showBatchEditModal"
+        :selected-count="selectedServers.length"
+        :settings="settings"
+        :is-wss-report-enabled="isWssReportEnabled"
+        :saving="batchEditing"
+        @save="saveBatchEdit"
+        @close="closeBatchEditModal"
       />
 
       <div v-if="showAutoUpdateWarning" id="autoUpdateWarningModal" class="modal-overlay auto-update-warning-modal active">
@@ -188,12 +224,16 @@
         :delete-server-id="deleteServerId"
         :current-server-name="currentServerName"
         :delete-target-os="deleteTargetOs"
+        :delete-version="deleteVersion"
+        :delete-gh-proxy="deleteGhProxy"
         :uninstall-command="getUninstallCommand()"
         :uninstall-copied="uninstallCopied"
         @close="closeDeleteModal"
         @confirm-delete="confirmDelete"
         @copy-uninstall="copyUninstallCmd"
         @update:delete-target-os="deleteTargetOs = $event"
+        @update:delete-version="deleteVersion = $event"
+        @update:delete-gh-proxy="deleteGhProxy = $event"
       />
 
       <CopyCommandModal
@@ -201,12 +241,16 @@
         :show="showCopyModal"
         :current-server-name="currentServerName"
         :target-os="targetOs"
+        :install-gh-proxy="installGhProxy"
         :collect-interval="collectInterval"
         :report-interval="reportInterval"
+        :wss-report-interval="wssReportInterval"
+        :connection-mode="connectionMode"
         :custom-ct="customCt"
         :custom-cu="customCu"
         :custom-cm="customCm"
         :custom-bd="customBd"
+        :network-interface="networkInterface"
         :reset-day="resetDay"
         :rx-correction="rxCorrection"
         :tx-correction="txCorrection"
@@ -216,6 +260,7 @@
         @close="closeCopyModal"
         @copy-cmd="copyCustomCmd"
         @update:target-os="targetOs = $event"
+        @update:install-gh-proxy="installGhProxy = $event"
         @open-edit-from-copy="openEditModalFromCopy"
       />
 
@@ -274,7 +319,7 @@
       <div v-if="d1UsageResult" id="d1UsageModal" class="modal-overlay active">
         <div class="modal-dialog">
           <div class="modal-header">
-            <div class="modal-title">$ D1 & Workers quota --utc</div>
+            <div class="modal-title">$ D1, Workers & Durable Objects quota --utc</div>
             <button class="modal-close" @click="d1UsageResult = null">✕</button>
           </div>
 
@@ -291,7 +336,7 @@
                     <span>{{ getUsagePercent(d1UsageResult.usage.today.rowsRead, 5000000) }}%</span>
                   </div>
                   <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsagePercent(d1UsageResult.usage.today.rowsRead, 5000000) + '%' }"></div>
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.rowsRead, 5000000) + '%' }"></div>
                   </div>
                 </div>
                 <div class="quota-progress-item">
@@ -300,7 +345,7 @@
                     <span>{{ getUsagePercent(d1UsageResult.usage.today.rowsWritten, 100000) }}%</span>
                   </div>
                   <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsagePercent(d1UsageResult.usage.today.rowsWritten, 100000) + '%' }"></div>
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.rowsWritten, 100000) + '%' }"></div>
                   </div>
                 </div>
                 <div class="quota-progress-item">
@@ -309,40 +354,110 @@
                     <span>{{ getUsagePercent(d1UsageResult.usage.today.workersRequests, 100000) }}%</span>
                   </div>
                   <div v-if="d1UsageResult.usage.today.workersRequests" class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsagePercent(d1UsageResult.usage.today.workersRequests, 100000) + '%' }"></div>
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.workersRequests, 100000) + '%' }"></div>
+                  </div>
+                </div>
+                <div class="quota-progress-item">
+                  <div class="flex-justify-between text-sm mb-1">
+                    <span class="quota-label-with-help">
+                      <span>{{ trans.durableObjectsRequests }}：{{ formatNumber(d1UsageResult.usage.today.durableObjectsRequests) }} / {{ formatNumber(100000) }}</span>
+                      <HelpTooltip>
+                        <template #default>
+                          <span v-for="row in getDurableObjectsUsageRows(d1UsageResult.usage.today)" :key="row.key" class="quota-help-row">
+                            <span class="quota-help-label">{{ row.label }}</span>
+                            <span class="quota-help-value">{{ row.value }}</span>
+                          </span>
+                        </template>
+                      </HelpTooltip>
+                    </span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.today.durableObjectsRequests, 100000) }}%</span>
+                  </div>
+                  <div class="quota-progress-bar">
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.durableObjectsRequests, 100000) + '%' }"></div>
+                  </div>
+                </div>
+                <div class="quota-progress-item">
+                  <div class="flex-justify-between text-sm mb-1">
+                    <span class="quota-label-with-help">
+                      <span>{{ trans.durableObjectsDuration }}：{{ formatNumber(d1UsageResult.usage.today.durableObjectsDuration, 2) }} / {{ formatNumber(13000) }}</span>
+                      <HelpTooltip :text="trans.durableObjectsDurationTip">
+                        <template #default>
+                          <span class="quota-help-row">{{ trans.durableObjectsDurationTip }}</span>
+                        </template>
+                      </HelpTooltip>
+                    </span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.today.durableObjectsDuration, 13000) }}%</span>
+                  </div>
+                  <div class="quota-progress-bar">
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.durableObjectsDuration, 13000) + '%' }"></div>
                   </div>
                 </div>
               </div>
             </div>
 
             <div class="quota-section mt-4">
-              <div class="quota-section-title">{{ trans.last24HoursUsage }}</div>
+              <div class="quota-section-title">{{ trans.yesterdayUsage }}</div>
               <div class="quota-progress-list">
                 <div class="quota-progress-item">
                   <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.d1RowsRead }}：{{ formatNumber(d1UsageResult.usage.last24Hours.rowsRead) }} / {{ formatNumber(5000000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.last24Hours.rowsRead, 5000000) }}%</span>
+                    <span>{{ trans.d1RowsRead }}：{{ formatNumber(d1UsageResult.usage.yesterday.rowsRead) }} / {{ formatNumber(5000000) }}</span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.rowsRead, 5000000) }}%</span>
                   </div>
                   <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsagePercent(d1UsageResult.usage.last24Hours.rowsRead, 5000000) + '%' }"></div>
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.rowsRead, 5000000) + '%' }"></div>
                   </div>
                 </div>
                 <div class="quota-progress-item">
                   <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.d1RowsWritten }}：{{ formatNumber(d1UsageResult.usage.last24Hours.rowsWritten) }} / {{ formatNumber(100000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.last24Hours.rowsWritten, 100000) }}%</span>
+                    <span>{{ trans.d1RowsWritten }}：{{ formatNumber(d1UsageResult.usage.yesterday.rowsWritten) }} / {{ formatNumber(100000) }}</span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.rowsWritten, 100000) }}%</span>
                   </div>
                   <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsagePercent(d1UsageResult.usage.last24Hours.rowsWritten, 100000) + '%' }"></div>
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.rowsWritten, 100000) + '%' }"></div>
                   </div>
                 </div>
-                <div v-if="d1UsageResult.usage.last24Hours.workersRequests" class="quota-progress-item">
+                <div v-if="d1UsageResult.usage.yesterday.workersRequests" class="quota-progress-item">
                   <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.workersRequests }}：{{ formatNumber(d1UsageResult.usage.last24Hours.workersRequests) }} / {{ formatNumber(100000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.last24Hours.workersRequests, 100000) }}%</span>
+                    <span>{{ trans.workersRequests }}：{{ formatNumber(d1UsageResult.usage.yesterday.workersRequests) }} / {{ formatNumber(100000) }}</span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.workersRequests, 100000) }}%</span>
                   </div>
                   <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsagePercent(d1UsageResult.usage.last24Hours.workersRequests, 100000) + '%' }"></div>
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.workersRequests, 100000) + '%' }"></div>
+                  </div>
+                </div>
+                <div class="quota-progress-item">
+                  <div class="flex-justify-between text-sm mb-1">
+                    <span class="quota-label-with-help">
+                      <span>{{ trans.durableObjectsRequests }}：{{ formatNumber(d1UsageResult.usage.yesterday.durableObjectsRequests) }} / {{ formatNumber(100000) }}</span>
+                      <HelpTooltip>
+                        <template #default>
+                          <span v-for="row in getDurableObjectsUsageRows(d1UsageResult.usage.yesterday)" :key="row.key" class="quota-help-row">
+                            <span class="quota-help-label">{{ row.label }}</span>
+                            <span class="quota-help-value">{{ row.value }}</span>
+                          </span>
+                        </template>
+                      </HelpTooltip>
+                    </span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.durableObjectsRequests, 100000) }}%</span>
+                  </div>
+                  <div class="quota-progress-bar">
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.durableObjectsRequests, 100000) + '%' }"></div>
+                  </div>
+                </div>
+                <div class="quota-progress-item">
+                  <div class="flex-justify-between text-sm mb-1">
+                    <span class="quota-label-with-help">
+                      <span>{{ trans.durableObjectsDuration }}：{{ formatNumber(d1UsageResult.usage.yesterday.durableObjectsDuration, 2) }} / {{ formatNumber(13000) }}</span>
+                      <HelpTooltip :text="trans.durableObjectsDurationTip">
+                        <template #default>
+                          <span class="quota-help-row">{{ trans.durableObjectsDurationTip }}</span>
+                        </template>
+                      </HelpTooltip>
+                    </span>
+                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.durableObjectsDuration, 13000) }}%</span>
+                  </div>
+                  <div class="quota-progress-bar">
+                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.durableObjectsDuration, 13000) + '%' }"></div>
                   </div>
                 </div>
               </div>
@@ -437,23 +552,67 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TerminalHeader from '../../components/TerminalHeader.vue'
 import Footer from '../../components/Footer.vue'
+import HelpTooltip from '../../components/HelpTooltip.vue'
 import AdminLogin from './components/AdminLogin.vue'
 import ServerTable from './components/ServerTable.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import DatabasePanel from './components/DatabasePanel.vue'
+import ThemeStorePanel from './components/ThemeStorePanel.vue'
 import EditServerModal from './components/EditServerModal.vue'
+import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
 import CopyCommandModal from './components/CopyCommandModal.vue'
 import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, getApiBases, fetchConfig } from '../../utils/api'
 import { hasMultipleApiBases } from '../../utils/config.js'
 import { t, useTranslation } from '../../utils/i18n'
 import { PING_NODE_FIELDS, validatePingNode } from '../../utils/pingNode.js'
+import { normalizeDisplayMode, resolveDisplayMode } from '../../utils/displayMode.js'
+import { applyMikusThemeOptions } from '../../utils/themeOptions.js'
+import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../utils/constants.js'
 import { usePasswordVisibility } from '../../composables/usePasswordVisibility'
 import { useTurnstile } from './composables/useTurnstile'
+import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../../utils/server.js'
 
 const trans = useTranslation()
 const route = useRoute()
 const router = useRouter()
+const AGENT_RELEASE_URL = 'https://api.github.com/repos/huilang-me/cfsm-agent/releases/latest'
+const AGENT_RELEASE_FAILURE_TTL = 30 * 1000
+
+let cachedAgentReleaseVersion = ''
+let cachedAgentReleaseFailureAt = 0
+let agentReleasePromise = null
+
+const normalizeVersion = (version) => String(version || '').trim()
+
+const fetchLatestAgentReleaseVersion = async () => {
+  if (cachedAgentReleaseVersion) return cachedAgentReleaseVersion
+  if (cachedAgentReleaseFailureAt && Date.now() - cachedAgentReleaseFailureAt < AGENT_RELEASE_FAILURE_TTL) return ''
+  if (agentReleasePromise) return agentReleasePromise
+
+  agentReleasePromise = fetch(AGENT_RELEASE_URL, {
+    headers: { Accept: 'application/vnd.github+json' }
+  }).then(async (res) => {
+    if (!res.ok) throw new Error(`GitHub release request failed: ${res.status}`)
+    const release = await res.json()
+    const version = normalizeVersion(release?.tag_name)
+    if (version) {
+      cachedAgentReleaseVersion = version
+      cachedAgentReleaseFailureAt = 0
+    } else {
+      cachedAgentReleaseFailureAt = Date.now()
+    }
+    return version
+  }).catch((e) => {
+    cachedAgentReleaseFailureAt = Date.now()
+    console.error('[ERROR] Load latest agent release failed:', e)
+    return ''
+  }).finally(() => {
+    agentReleasePromise = null
+  })
+
+  return agentReleasePromise
+}
 
 const getMessage = (msg) => {
   if (typeof msg === 'string') {
@@ -463,10 +622,174 @@ const getMessage = (msg) => {
   return ''
 }
 
-const formatNumber = (value) => Number(value || 0).toLocaleString()
+const normalizeTgNotifySetting = (value) => {
+  if (value === true || value === 'true') return '5'
+  if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
+
+  const minutes = Number(value)
+  if (Number.isInteger(minutes) && (minutes === 0 || (minutes >= 2 && minutes <= 30))) {
+    return String(minutes)
+  }
+
+  return '0'
+}
+
+const isTgNotifyEnabled = (value) => normalizeTgNotifySetting(value) !== '0'
+
+const normalizeExpireReminderSetting = (value) => {
+  if (value === true || value === 'true') return '7'
+  if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
+
+  const days = Number(value)
+  if (Number.isInteger(days) && days >= 0 && days <= 7) {
+    return String(days)
+  }
+
+  return '0'
+}
+
+const isExpireReminderEnabled = (value) => normalizeExpireReminderSetting(value) !== '0'
+
+const normalizeLongHistoryPointsSetting = (value) => {
+  const points = Number(value)
+  return String(
+    HISTORY.LONG_RANGE_POINT_OPTIONS.includes(points)
+      ? points
+      : HISTORY.DEFAULT_LONG_RANGE_POINTS
+  )
+}
+
+const normalizeFrontendWsTimeoutMinutesSetting = (value) => {
+  const minutes = Number(value)
+  return Number.isInteger(minutes) && minutes >= 0 && minutes <= FRONTEND_WS_TIMEOUT_MINUTES_MAX
+    ? minutes
+    : 0
+}
+
+const normalizeResourceAlertModeSetting = (value) => {
+  const mode = String(value || '').trim().toLowerCase()
+  return mode === 'continuous' ? 'continuous' : 'average'
+}
+
+const normalizeResourceAlertIntervalSetting = (value) => {
+  const minutes = Number(value)
+  if (Number.isInteger(minutes) && minutes >= 5 && minutes <= 10) {
+    return String(minutes)
+  }
+  return '5'
+}
+
+const normalizeResourceAlertMetricSetting = (value) => {
+  const metric = String(value || '').trim()
+  return ['cpu', 'ram', 'disk', 'netIn', 'netOut'].includes(metric) ? metric : 'cpu'
+}
+
+const defaultResourceAlertThreshold = (metric) => (
+  metric === 'netIn' || metric === 'netOut' ? '100' : '80'
+)
+
+const normalizeResourceAlertThresholdSetting = (value, metric) => {
+  if (value === undefined || value === null || value === '') return defaultResourceAlertThreshold(metric)
+  const number = Number(value)
+  const max = metric === 'netIn' || metric === 'netOut' ? 100000 : 100
+  if (!Number.isFinite(number) || number <= 0 || number > max) return defaultResourceAlertThreshold(metric)
+  return String(Math.round(number * 100) / 100)
+}
+
+const normalizeResourceAlertServersSetting = (value) => {
+  if (!Array.isArray(value)) return []
+  const seen = new Set()
+  return value.map(item => String(item || '').trim()).filter(id => {
+    if (!id || id.length > 64 || !/^[A-Za-z0-9._:-]+$/.test(id) || seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+}
+
+const normalizeResourceAlertRulesSetting = (value) => {
+  let rules = Array.isArray(value) ? value : []
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value)
+      rules = Array.isArray(parsed) ? parsed : []
+    } catch (_) {
+      rules = []
+    }
+  }
+  return rules.map((rule, index) => {
+    const metric = normalizeResourceAlertMetricSetting(rule?.metric)
+    return {
+      id: String(rule?.id || `rule_${index + 1}`).replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 64) || `rule_${index + 1}`,
+      name: String(rule?.name || '').trim().slice(0, 80) || `Resource Alert ${index + 1}`,
+      metric,
+      threshold: normalizeResourceAlertThresholdSetting(rule?.threshold, metric),
+      servers: normalizeResourceAlertServersSetting(rule?.servers || rule?.serverIds),
+      intervalMinutes: normalizeResourceAlertIntervalSetting(rule?.intervalMinutes || rule?.windowMinutes),
+      mode: normalizeResourceAlertModeSetting(rule?.mode)
+    }
+  }).slice(0, 20)
+}
+
+const isResourceAlertEnabled = (rules) => normalizeResourceAlertRulesSetting(rules).length > 0
+
+const isNotificationWebhookEnabled = () => settings.value.notification_webhook_enabled === true
+
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+const formatThemeOptions = (value) => {
+  const normalized = value === undefined || value === null ? {} : value
+  try {
+    return JSON.stringify(normalized, null, 2)
+  } catch (_) {
+    return '{}'
+  }
+}
+
+const parseThemeOptions = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return { valid: true, value: {} }
+  try {
+    const parsed = JSON.parse(raw)
+    if (!isPlainObject(parsed)) {
+      return { valid: false }
+    }
+    return { valid: true, value: parsed }
+  } catch (_) {
+    return { valid: false }
+  }
+}
+
+const formatNumber = (value, maximumFractionDigits = 0) => (
+  Number(value || 0).toLocaleString(undefined, { maximumFractionDigits })
+)
+const getDurableObjectsUsageRows = (usage = {}) => ([
+  {
+    key: 'http',
+    label: trans.value.durableObjectsHttpRequests,
+    value: `${formatNumber(usage.durableObjectsHttpRequests)} · ${trans.value.billingRatioOneToOne}`
+  },
+  {
+    key: 'hibernation',
+    label: trans.value.durableObjectsHibernationWakeups,
+    value: `${formatNumber(usage.durableObjectsHibernationWakeups)} · ${trans.value.billingRatioOneToOne}`
+  },
+  {
+    key: 'inbound-ws',
+    label: trans.value.durableObjectsInboundWebSocketMessages,
+    value: `${formatNumber(usage.durableObjectsInboundWebSocketMessages)} · ${trans.value.billingRatioWebSocketIncoming}`
+  },
+  {
+    key: 'outbound-ws',
+    label: trans.value.durableObjectsOutboundWebSocketMessages,
+    value: `${formatNumber(usage.durableObjectsOutboundWebSocketMessages)} · ${trans.value.billingRatioNotBilled}`
+  }
+])
 const getUsagePercent = (used, limit) => {
   if (!limit) return 0
-  return Math.min(100, Number(((Number(used || 0) / Number(limit)) * 100).toFixed(2)))
+  return Number(((Number(used || 0) / Number(limit)) * 100).toFixed(2))
+}
+const getUsageBarPercent = (used, limit) => {
+  return Math.min(100, Math.max(0, getUsagePercent(used, limit)))
 }
 
 const isMultipleMode = computed(() => hasMultipleApiBases())
@@ -511,18 +834,31 @@ const newServerGroup = ref('')
 const settings = ref({
   site_title: '',
   custom_bg: '',
+  favicon: '',
   custom_head: '',
   custom_script: '',
+  display_mode: 'bar',
+  theme_options: '{}',
   is_public: false,
   show_price: true,
   show_expire: true,
   show_tf: true,
-  show_time: true,
-  show_long_history: false,
-  tg_notify: 'false',
-  expire_reminder: 'false',
+  show_three_net_details: false,
+  wss_report_enabled: false,
+  frontend_ws_timeout_minutes: 0,
+  long_history_points: String(HISTORY.DEFAULT_LONG_RANGE_POINTS),
+  tg_notify: '0',
+  expire_reminder: '0',
+  resource_alert_rules: [],
   tg_bot_token: '',
   tg_chat_id: '',
+  notification_webhook_enabled: false,
+  notification_webhook_url: '',
+  notification_webhook_method: 'POST',
+  notification_webhook_format: 'json',
+  notification_webhook_headers: '',
+  notification_webhook_body: '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
+  notification_template: '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
   turnstile_enabled: false,
   turnstile_site_key: '',
   turnstile_secret_key: '',
@@ -536,6 +872,7 @@ const settings = ref({
   custom_cu: '',
   custom_cm: '',
   custom_bd: '',
+  theme_url: '',
   csp_static: '',
   csp_api: ''
 })
@@ -547,7 +884,13 @@ const clearAdminPasswordInputs = () => {
   settings.value.confirm_password = ''
 }
 
+const isAdminUsernameEmpty = () => !String(settings.value.username || '').trim()
+
 const toggleAdminPasswordChange = () => {
+  if (isAdminUsernameEmpty()) {
+    changeAdminPassword.value = true
+    return
+  }
   changeAdminPassword.value = !changeAdminPassword.value
   if (!changeAdminPassword.value) {
     clearAdminPasswordInputs()
@@ -555,7 +898,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
 ])
 
 const {
@@ -566,19 +909,28 @@ const {
 } = useTurnstile()
 
 const showEditModal = ref(false)
+const showBatchEditModal = ref(false)
+const batchEditing = ref(false)
 const editForm = ref({
   id: '',
   name: '',
   server_group: '',
+  region: '',
   tags: '',
   note: '',
   price: '',
+  billing_cycle: 'month',
+  auto_renewal: false,
+  currency: '¥',
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  interface: '',
   reset_day: 1,
   collect_interval: 0,
   report_interval: 60,
+  wss_report_interval: 2,
+  connection_mode: 'auto',
   custom_ct: '',
   custom_cu: '',
   custom_cm: '',
@@ -590,14 +942,49 @@ const editForm = ref({
   offline_notify_disabled: false
 })
 
+const createBatchEditDefaults = () => ({
+  server_group: '',
+  region: '',
+  tags: '',
+  price: '',
+  billing_cycle: 'month',
+  auto_renewal: false,
+  currency: '¥',
+  expire_date: '',
+  traffic_limit: '',
+  traffic_calc_type: 'total',
+  interface: '',
+  reset_day: 1,
+  collect_interval: 0,
+  report_interval: 60,
+  wss_report_interval: 2,
+  connection_mode: 'auto',
+  custom_ct: '',
+  custom_cu: '',
+  custom_cm: '',
+  custom_bd: '',
+  rx_correction: '',
+  tx_correction: '',
+  auto_update: false,
+  is_hidden: false,
+  offline_notify_disabled: false
+})
+
+const batchEditForm = ref(createBatchEditDefaults())
+const batchEditEnabled = ref(Object.fromEntries(Object.keys(createBatchEditDefaults()).map(field => [field, false])))
+
 const showDeleteModal = ref(false)
 const deleteServerId = ref('')
 
 const copiedServerId = ref(null)
 const copiedNoteServerId = ref(null)
+const copiedSpecKey = ref(null)
 const deleteTargetOs = ref('linux')
+const deleteVersion = ref('go')
+const deleteGhProxy = ref('')
 const uninstallCopied = ref(false)
 const saving = ref(false)
+
 
 const showDbModal = ref(false)
 const dbOperation = ref('')
@@ -620,17 +1007,34 @@ const showCopyModal = ref(false)
 const copyServerId = ref('')
 const currentServerName = ref('')
 const targetOs = ref('linux')
+const installGhProxy = ref('')
 const collectInterval = ref(0)
 const reportInterval = ref(60)
+const wssReportInterval = ref(2)
+const connectionMode = ref('auto')
 const customCt = ref('')
 const customCu = ref('')
 const customCm = ref('')
 const customBd = ref('')
+const networkInterface = ref('')
 const resetDay = ref(1)
 const rxCorrection = ref('')
 const txCorrection = ref('')
 const autoUpdate = ref(false)
 const copiedCmd = ref(false)
+
+const isWssReportEnabled = computed(() => settings.value.wss_report_enabled === true)
+const getEffectiveConnectionMode = (value) => {
+  const connectionMode = value === 'http' ? 'http' : 'auto'
+  return isWssReportEnabled.value ? connectionMode : 'http'
+}
+
+watch(isWssReportEnabled, (enabled) => {
+  if (!enabled) {
+    editForm.value.connection_mode = 'http'
+    connectionMode.value = 'http'
+  }
+})
 
 const getPingNodeLabel = (field) => ({
   custom_ct: trans.value.customCt,
@@ -691,6 +1095,23 @@ const copyServerNote = async (server) => {
   }
 }
 
+const copyServerSpec = async ({ key, text } = {}) => {
+  const value = String(text || '').trim()
+  if (!key || !value || value === '-') return
+
+  try {
+    await copyTextToClipboard(value)
+    copiedSpecKey.value = key
+    setTimeout(() => {
+      if (copiedSpecKey.value === key) {
+        copiedSpecKey.value = null
+      }
+    }, 1500)
+  } catch (e) {
+    console.error('[ERROR] Copy spec failed:', e)
+  }
+}
+
 const handleLogin = async () => {
   loginError.value = ''
   loginLoading.value = true
@@ -728,11 +1149,16 @@ const handleLogin = async () => {
 }
 
 const logout = async () => {
+  try {
+    await adminApiForSite({ action: 'logout' })
+  } catch (_) {
+  }
   apiLogout()
   isLoggedIn.value = false
   latestAgentVersion.value = ''
   clearTurnstile()
   await loadTurnstileConfig()
+  window.location.href = '/'
 }
 
 const checkLoginStatus = () => {
@@ -805,10 +1231,11 @@ const handleAdminApiIndexChange = async () => {
 const loadLatestAgentVersion = async () => {
   try {
     const config = await fetchConfig(selectedApiIndex.value)
-    latestAgentVersion.value = config?.last_agent_version || ''
+    const configVersion = normalizeVersion(config?.last_agent_version)
+    latestAgentVersion.value = configVersion || await fetchLatestAgentReleaseVersion()
   } catch (e) {
     console.error('[ERROR] Load latest agent version failed:', e)
-    latestAgentVersion.value = ''
+    latestAgentVersion.value = await fetchLatestAgentReleaseVersion()
   }
 }
 
@@ -821,18 +1248,31 @@ const loadSettings = async () => {
       settings.value = {
         site_title: settingsData.site_title || '',
         custom_bg: settingsData.custom_bg || '',
+        favicon: settingsData.favicon || '',
         custom_head: settingsData.custom_head || '',
         custom_script: settingsData.custom_script || '',
+        display_mode: resolveDisplayMode(settingsData),
+        theme_options: formatThemeOptions(settingsData.theme_options),
         is_public: settingsData.is_public === 'true',
         show_price: settingsData.show_price === 'true',
         show_expire: settingsData.show_expire === 'true',
         show_tf: settingsData.show_tf === 'true',
-        show_time: settingsData.show_time === 'true',
-        show_long_history: settingsData.show_long_history === 'true',
-        tg_notify: settingsData.tg_notify || 'false',
-        expire_reminder: settingsData.expire_reminder || 'false',
+        show_three_net_details: settingsData.show_three_net_details === 'true' || settingsData.show_three_net_details === true,
+        wss_report_enabled: settingsData.wss_report_enabled === 'true' || settingsData.wss_report_enabled === true,
+        frontend_ws_timeout_minutes: normalizeFrontendWsTimeoutMinutesSetting(settingsData.frontend_ws_timeout_minutes),
+        long_history_points: normalizeLongHistoryPointsSetting(settingsData.long_history_points),
+        tg_notify: normalizeTgNotifySetting(settingsData.tg_notify),
+        expire_reminder: normalizeExpireReminderSetting(settingsData.expire_reminder),
+        resource_alert_rules: normalizeResourceAlertRulesSetting(settingsData.resource_alert_rules),
         tg_bot_token: settingsData.tg_bot_token || '',
         tg_chat_id: settingsData.tg_chat_id || '',
+        notification_webhook_enabled: settingsData.notification_webhook_enabled === 'true' || settingsData.notification_webhook_enabled === true,
+        notification_webhook_url: settingsData.notification_webhook_url || '',
+        notification_webhook_method: String(settingsData.notification_webhook_method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST',
+        notification_webhook_format: ['json', 'form', 'text'].includes(String(settingsData.notification_webhook_format || '').toLowerCase()) ? String(settingsData.notification_webhook_format).toLowerCase() : 'json',
+        notification_webhook_headers: settingsData.notification_webhook_headers || '',
+        notification_webhook_body: settingsData.notification_webhook_body || '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
+        notification_template: settingsData.notification_template || '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
         turnstile_enabled: settingsData.turnstile_enabled === 'true',
         turnstile_login_enabled: settingsData.turnstile_login_enabled === 'true',
         turnstile_site_key: settingsData.turnstile_site_key || '',
@@ -847,16 +1287,32 @@ const loadSettings = async () => {
         custom_cu: settingsData.custom_cu || '',
         custom_cm: settingsData.custom_cm || '',
         custom_bd: settingsData.custom_bd || '',
+        theme_url: settingsData.theme_url || '',
         csp_static: settingsData.csp_static || '',
         csp_api: settingsData.csp_api || ''
       }
-      changeAdminPassword.value = false
+      applyMikusThemeOptions(settingsData.theme_options)
+      changeAdminPassword.value = !String(settings.value.username || '').trim()
       apiSecret.value = data.api_secret || ''
     }
   } catch (e) {
     console.error('[ERROR] Load settings failed:', e)
   }
 }
+
+const handleThemeOptionsApplied = (themeOptions) => {
+  settings.value.theme_options = formatThemeOptions(themeOptions)
+  applyMikusThemeOptions(themeOptions)
+}
+
+watch(
+  () => settings.value.username,
+  () => {
+    if (isAdminUsernameEmpty()) {
+      changeAdminPassword.value = true
+    }
+  }
+)
 
 const saveSettings = async () => {
   if (saving.value) return
@@ -876,6 +1332,12 @@ const saveSettings = async () => {
 
   if (!settings.value.username || settings.value.username.trim().length === 0) {
     validationError.value = trans.value.usernameRequired
+    return
+  }
+
+  const frontendWsTimeoutMinutes = Number(settings.value.frontend_ws_timeout_minutes)
+  if (!Number.isInteger(frontendWsTimeoutMinutes) || frontendWsTimeoutMinutes < 0 || frontendWsTimeoutMinutes > FRONTEND_WS_TIMEOUT_MINUTES_MAX) {
+    validationError.value = trans.value.invalidFrontendWsTimeoutMinutes
     return
   }
 
@@ -902,8 +1364,13 @@ const saveSettings = async () => {
     }
   }
 
-  if (settings.value.tg_notify === 'true' || settings.value.expire_reminder === 'true') {
-    if (!settings.value.tg_bot_token || settings.value.tg_bot_token.trim().length === 0) {
+  if (isTgNotifyEnabled(settings.value.tg_notify) || isExpireReminderEnabled(settings.value.expire_reminder) || isResourceAlertEnabled(settings.value.resource_alert_rules)) {
+    if (isNotificationWebhookEnabled()) {
+      if (!settings.value.notification_webhook_url || settings.value.notification_webhook_url.trim().length === 0) {
+        validationError.value = trans.value.notificationWebhookUrlRequired || 'Webhook URL is required'
+        return
+      }
+    } else if (!settings.value.tg_bot_token || settings.value.tg_bot_token.trim().length === 0) {
       validationError.value = trans.value.tgBotTokenRequired
       return
     }
@@ -912,6 +1379,12 @@ const saveSettings = async () => {
   const pingNodeValidation = getPingNodeValidation(settings.value)
   if (!pingNodeValidation.valid) {
     validationError.value = buildPingNodeError(pingNodeValidation.field)
+    return
+  }
+
+  const themeOptionsResult = parseThemeOptions(settings.value.theme_options)
+  if (!themeOptionsResult.valid) {
+    validationError.value = trans.value.invalidThemeOptionsFormat
     return
   }
 
@@ -931,18 +1404,33 @@ const saveSettings = async () => {
     settings: {
       site_title: settings.value.site_title,
       custom_bg: settings.value.custom_bg,
+      favicon: settings.value.favicon,
       custom_head: settings.value.custom_head,
       custom_script: settings.value.custom_script,
+      display_mode: normalizeDisplayMode(settings.value.display_mode),
+      appearance_options: {
+        theme_options: themeOptionsResult.value
+      },
       is_public: settings.value.is_public ? 'true' : 'false',
       show_price: settings.value.show_price ? 'true' : 'false',
       show_expire: settings.value.show_expire ? 'true' : 'false',
       show_tf: settings.value.show_tf ? 'true' : 'false',
-      show_time: settings.value.show_time ? 'true' : 'false',
-      show_long_history: settings.value.show_long_history ? 'true' : 'false',
-      tg_notify: settings.value.tg_notify,
-      expire_reminder: settings.value.expire_reminder,
+      show_three_net_details: settings.value.show_three_net_details ? 'true' : 'false',
+      wss_report_enabled: settings.value.wss_report_enabled ? 'true' : 'false',
+      frontend_ws_timeout_minutes: String(frontendWsTimeoutMinutes),
+      long_history_points: normalizeLongHistoryPointsSetting(settings.value.long_history_points),
+      tg_notify: normalizeTgNotifySetting(settings.value.tg_notify),
+      expire_reminder: normalizeExpireReminderSetting(settings.value.expire_reminder),
+      resource_alert_rules: normalizeResourceAlertRulesSetting(settings.value.resource_alert_rules),
       tg_bot_token: settings.value.tg_bot_token,
       tg_chat_id: settings.value.tg_chat_id,
+      notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
+      notification_webhook_url: settings.value.notification_webhook_url,
+      notification_webhook_method: settings.value.notification_webhook_method === 'GET' ? 'GET' : 'POST',
+      notification_webhook_format: ['json', 'form', 'text'].includes(settings.value.notification_webhook_format) ? settings.value.notification_webhook_format : 'json',
+      notification_webhook_headers: settings.value.notification_webhook_headers,
+      notification_webhook_body: settings.value.notification_webhook_body,
+      notification_template: settings.value.notification_template,
       turnstile_enabled: settings.value.turnstile_enabled ? 'true' : 'false',
       turnstile_login_enabled: settings.value.turnstile_login_enabled ? 'true' : 'false',
       turnstile_site_key: settings.value.turnstile_site_key,
@@ -971,6 +1459,7 @@ const saveSettings = async () => {
     const result = await adminApiForSite(data)
     if (!result.error) {
       saveResult.value = { success: true }
+      applyMikusThemeOptions(themeOptionsResult.value)
       clearAdminPasswordInputs()
       changeAdminPassword.value = false
       settings.value.jwt_secret = ''
@@ -1037,6 +1526,18 @@ const getInstallCommand = (serverId) => {
 
 const getUninstallCommand = () => {
   const HOST = selectedApiBase.value
+  const isGo = deleteVersion.value === 'go'
+  const proxy = isGo ? deleteGhProxy.value.trim() : ''
+  if (isGo) {
+    const proxyParam = proxy ? ` --install-ghproxy=${proxy}` : ''
+    if (deleteTargetOs.value === 'windows') {
+      const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
+      return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri "${ghUrl}" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall${proxyParam}`
+    }
+    const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
+    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
+    return `curl -fsSL ${ghUrl} | ${sudoPrefix}sh -s -- uninstall${proxyParam}`
+  }
   if (deleteTargetOs.value === 'windows') {
     return `irm ${HOST}/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1; powershell -ExecutionPolicy Bypass -File .\\cf-server-monitor.ps1 uninstall`
   }
@@ -1045,6 +1546,7 @@ const getUninstallCommand = () => {
   const script = deleteTargetOs.value === 'alpine' ? 'install-alpine.sh'
     : deleteTargetOs.value === 'openwrt' ? 'install-openwrt.sh'
     : deleteTargetOs.value === 'mac' ? 'install-mac.sh'
+    : deleteTargetOs.value === 'synology' ? 'install-synology.sh'
     : 'install.sh'
   return `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s uninstall`
 }
@@ -1054,12 +1556,16 @@ const copyCmd = (serverId) => {
   copyServerId.value = serverId
   currentServerName.value = server?.name || ''
   targetOs.value = 'linux'
+  installGhProxy.value = ''
   collectInterval.value = server?.collect_interval ?? 0
   reportInterval.value = server?.report_interval || 60
+  wssReportInterval.value = server?.wss_report_interval || 2
+  connectionMode.value = getEffectiveConnectionMode(server?.connection_mode)
   customCt.value = server?.custom_ct || settings.value.custom_ct
   customCu.value = server?.custom_cu || settings.value.custom_cu
   customCm.value = server?.custom_cm || settings.value.custom_cm
   customBd.value = server?.custom_bd || settings.value.custom_bd
+  networkInterface.value = server?.interface || ''
   resetDay.value = server?.reset_day ?? 1
   rxCorrection.value = server?.rx_correction ?? ''
   txCorrection.value = server?.tx_correction ?? ''
@@ -1070,42 +1576,64 @@ const copyCmd = (serverId) => {
 
 const hasCorrectionValue = (value) => value !== null && value !== undefined && value !== ''
 
+const buildGhRawUrl = (proxy, path) => {
+  const base = 'https://raw.githubusercontent.com'
+  if (!proxy) return `${base}${path}`
+  const cleanProxy = proxy.replace(/\/$/, '')
+  return `${cleanProxy}/${base}${path}`
+}
+
 const getCustomInstallCommand = () => {
   const HOST = selectedApiBase.value
   const autoUpdateFlag = autoUpdate.value ? 1 : 0
+  const proxy = installGhProxy.value.trim()
+  const effectiveConnectionMode = getEffectiveConnectionMode(connectionMode.value)
   if (targetOs.value === 'windows') {
     const params = [
-      'install',
-      `-Id '${copyServerId.value}'`,
-      `-Secret '${apiSecret.value}'`,
-      `-Url '${HOST}/update'`,
-      `-CollectInterval ${collectInterval.value}`,
-      `-ReportInterval ${reportInterval.value}`,
-      `-ResetDay ${resetDay.value ?? 1}`,
-      `-AutoUpdate ${autoUpdateFlag}`
+      'install'
     ]
-    if (customCt.value) params.push(`-CtNode '${customCt.value}'`)
-    if (customCu.value) params.push(`-CuNode '${customCu.value}'`)
-    if (customCm.value) params.push(`-CmNode '${customCm.value}'`)
-    if (customBd.value) params.push(`-BdNode '${customBd.value}'`)
-    if (hasCorrectionValue(rxCorrection.value)) params.push(`-RxCorrection ${rxCorrection.value}`)
-    if (hasCorrectionValue(txCorrection.value)) params.push(`-TxCorrection ${txCorrection.value}`)
-    return `irm ${HOST}/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1; powershell -ExecutionPolicy Bypass -File .\\cf-server-monitor.ps1 ${params.join(' ')}`
+    if (proxy) params.push(`--install-ghproxy='${proxy}'`)
+    params.push(
+      `-id='${copyServerId.value}'`,
+      `-secret='${apiSecret.value}'`,
+      `-url='${HOST}/update'`,
+      `-collect_interval='${collectInterval.value}'`,
+      `-interval='${reportInterval.value}'`,
+      `-connection_mode='${effectiveConnectionMode}'`,
+      `-reset_day='${resetDay.value ?? 1}'`,
+      `-auto_update='${autoUpdateFlag}'`
+    )
+    if (customCt.value) params.push(`-ct='${customCt.value}'`)
+    if (customCu.value) params.push(`-cu='${customCu.value}'`)
+    if (customCm.value) params.push(`-cm='${customCm.value}'`)
+    if (customBd.value) params.push(`-bd='${customBd.value}'`)
+    if (networkInterface.value) params.push(`-interface='${networkInterface.value}'`)
+    if (hasCorrectionValue(rxCorrection.value)) params.push(`-rx_correction='${rxCorrection.value}'`)
+    if (hasCorrectionValue(txCorrection.value)) params.push(`-tx_correction='${txCorrection.value}'`)
+    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
+    return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri "${ghUrl}" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
-  const shell = targetOs.value === 'alpine' || targetOs.value === 'openwrt' ? 'sh' : 'bash'
-  const sudoPrefix = targetOs.value === 'mac' ? 'sudo ' : ''
-  const script = targetOs.value === 'alpine' ? 'install-alpine.sh'
-    : targetOs.value === 'openwrt' ? 'install-openwrt.sh'
-    : targetOs.value === 'mac' ? 'install-mac.sh'
-    : 'install.sh'
-  let cmd = `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s install -id=${copyServerId.value} -secret='${apiSecret.value}' -url=${HOST}/update -collect_interval=${collectInterval.value} -interval=${reportInterval.value} -reset_day=${resetDay.value ?? 1} -auto_update=${autoUpdateFlag}`
-  if (customCt.value) cmd += ` -ct=${customCt.value}`
-  if (customCu.value) cmd += ` -cu=${customCu.value}`
-  if (customCm.value) cmd += ` -cm=${customCm.value}`
-  if (customBd.value) cmd += ` -bd=${customBd.value}`
-  if (hasCorrectionValue(rxCorrection.value)) cmd += ` -rx_correction=${rxCorrection.value}`
-  if (hasCorrectionValue(txCorrection.value)) cmd += ` -tx_correction=${txCorrection.value}`
-  return cmd
+  const params = ['install']
+  if (proxy) params.push(`--install-ghproxy=${proxy}`)
+  params.push(
+    `-id=${copyServerId.value}`,
+    `-secret='${apiSecret.value}'`,
+    `-url=${HOST}/update`,
+    `-collect_interval=${collectInterval.value}`,
+    `-interval=${reportInterval.value}`,
+    `-connection_mode=${effectiveConnectionMode}`,
+    `-reset_day=${resetDay.value ?? 1}`,
+    `-auto_update=${autoUpdateFlag}`
+  )
+  if (customCt.value) params.push(`-ct=${customCt.value}`)
+  if (customCu.value) params.push(`-cu=${customCu.value}`)
+  if (customCm.value) params.push(`-cm=${customCm.value}`)
+  if (customBd.value) params.push(`-bd=${customBd.value}`)
+  if (networkInterface.value) params.push(`-interface=${networkInterface.value}`)
+  if (hasCorrectionValue(rxCorrection.value)) params.push(`-rx_correction=${rxCorrection.value}`)
+  if (hasCorrectionValue(txCorrection.value)) params.push(`-tx_correction=${txCorrection.value}`)
+  const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
+  return `curl -fsSL ${ghUrl} | sh -s -- ${params.join(' ')}`
 }
 
 const copyCustomCmd = async () => {
@@ -1148,20 +1676,26 @@ const copyUninstallCmd = async () => {
   }, 1500)
 }
 
-const openEditModal = (server) => {
-  editForm.value = {
+const createEditFormFromServer = (server) => ({
     id: server.id,
     name: server.name || '',
     server_group: server.server_group || '',
+    region: server.region_override ?? (server.region || ''),
     tags: server.tags || '',
     note: server.note || '',
-    price: server.price || '',
+    price: normalizePrice(server.price),
+    billing_cycle: normalizeBillingCycle(detectBillingCycle(server.price) || server.billing_cycle),
+    auto_renewal: server.auto_renewal === '1' || server.auto_renewal === 1 || server.auto_renewal === true,
+    currency: normalizeCurrency(server.currency || detectCurrencySymbol(server.price) || '¥'),
     expire_date: server.expire_date || '',
     traffic_limit: server.traffic_limit || '',
     traffic_calc_type: server.traffic_calc_type || 'total',
+    interface: server.interface || '',
     reset_day: server.reset_day ?? 1,
     collect_interval: server.collect_interval ?? 0,
     report_interval: server.report_interval || 60,
+    wss_report_interval: server.wss_report_interval || 2,
+    connection_mode: getEffectiveConnectionMode(server.connection_mode),
     custom_ct: server.custom_ct || '',
     custom_cu: server.custom_cu || '',
     custom_cm: server.custom_cm || '',
@@ -1171,7 +1705,10 @@ const openEditModal = (server) => {
     auto_update: server.auto_update === '1' || server.auto_update === 1 || server.auto_update === true,
     is_hidden: server.is_hidden === '1',
     offline_notify_disabled: server.offline_notify_disabled === '1'
-  }
+})
+
+const openEditModal = (server) => {
+  editForm.value = createEditFormFromServer(server)
   currentServerName.value = server.name || ''
   showEditModal.value = true
 }
@@ -1204,6 +1741,63 @@ const cancelAutoUpdateWarning = () => {
   showAutoUpdateWarning.value = false
 }
 
+const buildEditPayloadFromForm = (form) => {
+  const pingNodeValidation = getPingNodeValidation(form)
+  if (!pingNodeValidation.valid) {
+    return { error: buildPingNodeError(pingNodeValidation.field) }
+  }
+
+  const normalizedBillingCycle = normalizeBillingCycle(form.billing_cycle)
+  const normalizedAutoRenewal = form.auto_renewal ? '1' : '0'
+  const normalizedPrice = normalizePrice(form.price)
+  const normalizedCurrency = normalizeCurrency(form.currency || detectCurrencySymbol(form.price) || '¥')
+  const normalizedExpireDate = renewExpireDateIfNeeded(
+    form.expire_date,
+    normalizedBillingCycle,
+    normalizedAutoRenewal
+  ).expire_date
+
+  return {
+    payload: {
+      action: 'edit',
+      id: form.id,
+      name: form.name,
+      server_group: form.server_group,
+      region: form.region,
+      tags: form.tags,
+      note: form.note,
+      price: normalizedPrice,
+      billing_cycle: normalizedBillingCycle,
+      auto_renewal: normalizedAutoRenewal,
+      currency: normalizedCurrency,
+      expire_date: normalizedExpireDate,
+      traffic_limit: form.traffic_limit,
+      traffic_calc_type: form.traffic_calc_type,
+      interface: form.interface,
+      reset_day: form.reset_day,
+      collect_interval: form.collect_interval,
+      report_interval: form.report_interval,
+      wss_report_interval: form.wss_report_interval,
+      connection_mode: getEffectiveConnectionMode(form.connection_mode),
+      custom_ct: pingNodeValidation.values.custom_ct,
+      custom_cu: pingNodeValidation.values.custom_cu,
+      custom_cm: pingNodeValidation.values.custom_cm,
+      custom_bd: pingNodeValidation.values.custom_bd,
+      rx_correction: form.rx_correction,
+      tx_correction: form.tx_correction,
+      auto_update: form.auto_update ? '1' : '0',
+      is_hidden: form.is_hidden ? '1' : '0',
+      offline_notify_disabled: form.offline_notify_disabled ? '1' : '0'
+    },
+    normalized: {
+      price: normalizedPrice,
+      currency: normalizedCurrency,
+      billing_cycle: normalizedBillingCycle,
+      expire_date: normalizedExpireDate
+    }
+  }
+}
+
 const saveEdit = async () => {
   validationError.value = null
 
@@ -1213,20 +1807,42 @@ const saveEdit = async () => {
     return
   }
 
+  const normalizedBillingCycle = normalizeBillingCycle(editForm.value.billing_cycle)
+  const normalizedAutoRenewal = editForm.value.auto_renewal ? '1' : '0'
+  const normalizedPrice = normalizePrice(editForm.value.price)
+  const normalizedCurrency = normalizeCurrency(editForm.value.currency || detectCurrencySymbol(editForm.value.price) || '¥')
+  const normalizedExpireDate = renewExpireDateIfNeeded(
+    editForm.value.expire_date,
+    normalizedBillingCycle,
+    normalizedAutoRenewal
+  ).expire_date
+
+  editForm.value.price = normalizedPrice
+  editForm.value.currency = normalizedCurrency
+  editForm.value.billing_cycle = normalizedBillingCycle
+  editForm.value.expire_date = normalizedExpireDate
+
   const data = {
     action: 'edit',
     id: editForm.value.id,
     name: editForm.value.name,
     server_group: editForm.value.server_group,
+    region: editForm.value.region,
     tags: editForm.value.tags,
     note: editForm.value.note,
-    price: editForm.value.price,
-    expire_date: editForm.value.expire_date,
+    price: normalizedPrice,
+    billing_cycle: normalizedBillingCycle,
+    auto_renewal: normalizedAutoRenewal,
+    currency: normalizedCurrency,
+    expire_date: normalizedExpireDate,
     traffic_limit: editForm.value.traffic_limit,
     traffic_calc_type: editForm.value.traffic_calc_type,
+    interface: editForm.value.interface,
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
     report_interval: editForm.value.report_interval,
+    wss_report_interval: editForm.value.wss_report_interval,
+    connection_mode: getEffectiveConnectionMode(editForm.value.connection_mode),
     custom_ct: pingNodeValidation.values.custom_ct,
     custom_cu: pingNodeValidation.values.custom_cu,
     custom_cm: pingNodeValidation.values.custom_cm,
@@ -1258,6 +1874,8 @@ const openDeleteModal = (id) => {
   const server = servers.value.find(s => s.id === id)
   currentServerName.value = server?.name || ''
   deleteTargetOs.value = 'linux'
+  deleteVersion.value = 'go'
+  deleteGhProxy.value = ''
   uninstallCopied.value = false
   showDeleteModal.value = true
 }
@@ -1302,6 +1920,95 @@ const batchDelete = async () => {
   }
 }
 
+const getSelectedServerRows = () => {
+  const selected = new Set(selectedServers.value.map(id => String(id)))
+  return servers.value.filter(server => selected.has(String(server.id)))
+}
+
+const getCommonBatchValue = (forms, field, fallback) => {
+  if (forms.length === 0) return fallback
+  const first = forms[0][field]
+  return forms.every(form => form[field] === first) ? first : fallback
+}
+
+const openBatchEditModal = () => {
+  const selected = getSelectedServerRows()
+  if (selected.length === 0) {
+    alertMessage.value = trans.value.selectServersToEdit || trans.value.selectServers
+    return
+  }
+
+  const defaults = createBatchEditDefaults()
+  const forms = selected.map(createEditFormFromServer)
+  batchEditForm.value = Object.fromEntries(
+    Object.keys(defaults).map(field => [field, getCommonBatchValue(forms, field, defaults[field])])
+  )
+  batchEditEnabled.value = Object.fromEntries(Object.keys(defaults).map(field => [field, false]))
+  showBatchEditModal.value = true
+}
+
+const closeBatchEditModal = () => {
+  if (batchEditing.value) return
+  showBatchEditModal.value = false
+}
+
+const saveBatchEdit = async () => {
+  if (batchEditing.value) return
+
+  const enabledFields = Object.keys(batchEditEnabled.value).filter(field => batchEditEnabled.value[field])
+  if (enabledFields.length === 0) {
+    alertMessage.value = trans.value.noBatchEditFields || 'Please select fields to update'
+    return
+  }
+
+  const selected = getSelectedServerRows()
+  if (selected.length === 0) {
+    alertMessage.value = trans.value.selectServersToEdit || trans.value.selectServers
+    return
+  }
+
+  if (batchEditEnabled.value.auto_update && batchEditForm.value.auto_update) {
+    const ok = confirm(trans.value.autoUpdateRiskDesc || trans.value.autoUpdateRiskTitle || 'Enable auto-update?')
+    if (!ok) return
+  }
+
+  validationError.value = null
+  batchEditing.value = true
+
+  try {
+    let updated = 0
+    for (const server of selected) {
+      const form = createEditFormFromServer(server)
+      for (const field of enabledFields) {
+        form[field] = batchEditForm.value[field]
+      }
+      const built = buildEditPayloadFromForm(form)
+      if (built.error) {
+        validationError.value = built.error
+        return
+      }
+      const result = await adminApiForSite(built.payload)
+      if (result.error) {
+        saveResult.value = { success: false, error: getMessage(result.error) || 'Fail' }
+        return
+      }
+      updated += 1
+    }
+
+    saveResult.value = {
+      success: true,
+      message: (trans.value.batchEditSuccess || 'Batch edit completed').replace('{count}', updated)
+    }
+    selectedServers.value = []
+    showBatchEditModal.value = false
+    await loadServers()
+  } catch (e) {
+    saveResult.value = { success: false, error: e.message }
+  } finally {
+    batchEditing.value = false
+  }
+}
+
 const handleSelectAll = (e) => {
   const checked = e.target.checked
   selectedServers.value = checked ? servers.value.map(s => s.id) : []
@@ -1326,18 +2033,29 @@ const toggleServer = (id) => {
 
 let draggedRow = null
 
-const handleDragStart = (e) => {
-  const row = e.target.closest('.server-row')
-  draggedRow = row ? row.dataset.serverId : null
-  e.dataTransfer.effectAllowed = 'move'
+const handleDragStart = (e, serverId = null) => {
+  const row = e?.target?.closest?.('.server-row')
+  draggedRow = String(serverId || row?.dataset?.serverId || '')
+  if (e?.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+  }
 }
 
 const handleDrop = async (e, targetId) => {
-  if (!draggedRow || draggedRow === targetId) return
+  e?.preventDefault?.()
+  targetId = String(targetId || '')
+  if (!draggedRow || draggedRow === targetId) {
+    draggedRow = null
+    return
+  }
 
-  const rows = Array.from(document.querySelectorAll('.server-row'))
+  const rows = Array.from(document.querySelectorAll('#tab-servers .table-wrapper .terminal-table tbody > .server-row[data-server-id]'))
   const draggedIndex = rows.findIndex(r => r.dataset.serverId === draggedRow)
   const targetIndex = rows.findIndex(r => r.dataset.serverId === targetId)
+  if (draggedIndex < 0 || targetIndex < 0) {
+    draggedRow = null
+    return
+  }
 
   const orders = rows.map(r => r.dataset.serverId)
   const [dragged] = orders.splice(draggedIndex, 1)
@@ -1355,7 +2073,7 @@ const handleDrop = async (e, targetId) => {
   draggedRow = null
 }
 
-const uploadBg = (e) => {
+const uploadImageSetting = (e, field) => {
   const file = e.target.files[0]
   if (!file) return
   if (file.size > 800 * 1024) {
@@ -1364,10 +2082,14 @@ const uploadBg = (e) => {
   }
   const reader = new FileReader()
   reader.onload = function(event) {
-    settings.value.custom_bg = event.target.result
+    settings.value[field] = event.target.result
   }
   reader.readAsDataURL(file)
 }
+
+const uploadBg = (e) => uploadImageSetting(e, 'custom_bg')
+
+const uploadFavicon = (e) => uploadImageSetting(e, 'favicon')
 
 const handleUpgradeDatabase = async () => {
   dbOperation.value = 'upgrade'
@@ -1442,7 +2164,14 @@ const sendTestNotification = async () => {
     const result = await adminApiForSite({
       action: 'send_test_notification',
       tg_bot_token: settings.value.tg_bot_token,
-      tg_chat_id: settings.value.tg_chat_id
+      tg_chat_id: settings.value.tg_chat_id,
+      notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
+      notification_webhook_url: settings.value.notification_webhook_url,
+      notification_webhook_method: settings.value.notification_webhook_method,
+      notification_webhook_format: settings.value.notification_webhook_format,
+      notification_webhook_headers: settings.value.notification_webhook_headers,
+      notification_webhook_body: settings.value.notification_webhook_body,
+      notification_template: settings.value.notification_template
     })
     if (!result.error) {
       alertMessage.value = getMessage(result.data.message) || trans.value.testNotificationSent

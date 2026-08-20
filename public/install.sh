@@ -1,6 +1,5 @@
 #!/bin/bash
 # ==============================================================================
-# V1.3.1
 # CF-Server-Monitor 安装/卸载脚本 (企业级安全加固版)
 # 支持: Ubuntu/Debian/CentOS/RHEL/Fedora/Rocky/AlmaLinux
 # Fixes: 1. 独立协程无 wait 阻塞 2. 原子化原子覆盖 3. 兼容全版本 Systemd 4. 严格 set -u 闭环
@@ -8,7 +7,7 @@
 
 set -euo pipefail
 
-AGENT_VERSION="1.3.1"
+AGENT_VERSION="1.3.8"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -27,6 +26,7 @@ CONFIG_FILE="${CONFIG_DIR}/config.conf"
 TRAFFIC_DATA_FILE="${CONFIG_DIR}/traffic.dat"
 OLD_TRAFFIC_DATA_FILE="/var/lib/cf-probe/traffic.dat"
 MAX_TRAFFIC_CORRECTION_GB=1000000
+AUTO_UPDATE_DELAY_SECONDS=60
 CONTAINER_PID_FILE="/run/cf-probe.pid"
 CONTAINER_LOG_FILE="/var/log/cf-probe.log"
 DEBUG_ENV_FILE="/run/cf-probe-debug.env"
@@ -62,6 +62,7 @@ print_usage() {
     echo "  -cu=HOST       自定义CU测试节点"
     echo "  -cm=HOST       自定义CM测试节点"
     echo "  -bd=HOST       自定义BD测试节点"
+    echo "  -interface=IFACES 指定网卡统计，多个用英文逗号分隔，默认自动汇总"
     echo "  -reset_day=N   流量重置日(1-31, 0=不重置)，默认1"
     echo "  -auto_update=0|1 自动更新探针，默认0"
     echo "  -rx_correction=N  下行流量校正(GB)，覆盖当月下行数据"
@@ -72,6 +73,7 @@ print_usage() {
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com"
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com -interval=30"
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com -ct=ct.example.com -cu=cu.example.com"
+    echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com -interface=eth0,ens3"
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com -reset_day=15"
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com -rx_correction=10 -tx_correction=5"
     echo "  bash $0 install -id=server123 -secret=abc123 -url=https://worker.example.com -debug=1"
@@ -85,6 +87,45 @@ normalize_binary_value() {
         0|1) printf '%s' "$value" ;;
         *) return 1 ;;
     esac
+}
+
+normalize_interface_list() {
+    printf '%s' "${1:-}" | awk -F',' '
+        {
+            for (i = 1; i <= NF; i++) {
+                name = $i
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+                if (name == "") continue
+                if (length(name) > 64 || name !~ /^[A-Za-z0-9_.:-]+$/) exit 1
+                if (!seen[name]++) out = out (out ? "," : "") name
+            }
+        }
+        END {
+            if (length(out) > 255) exit 1
+            printf "%s", out
+        }
+    '
+}
+
+get_configured_net_bytes() {
+    local interfaces
+    interfaces=$(normalize_interface_list "${1:-}") || interfaces=""
+    awk -v interfaces="$interfaces" '
+        BEGIN {
+            split(interfaces, parts, ",")
+            for (i in parts) if (parts[i] != "") wanted[parts[i]] = 1
+        }
+        NR > 2 {
+            iface = $1
+            sub(/:$/, "", iface)
+            if (interfaces != "") {
+                if (wanted[iface]) { rx += $2; tx += $10 }
+            } else if (iface ~ /^(eth|en|wl)[a-z0-9]*$/) {
+                rx += $2; tx += $10
+            }
+        }
+        END { printf "%.0f %.0f\n", rx + 0, tx + 0 }
+    ' /proc/net/dev 2>/dev/null || echo "0 0"
 }
 
 detect_runtime_mode() {
@@ -222,6 +263,24 @@ case "$DEBUG_MODE" in
     *) DEBUG_MODE=0 ;;
 esac
 
+normalize_interface_list() {
+    printf '%s' "${1:-}" | awk -F',' '
+        {
+            for (i = 1; i <= NF; i++) {
+                name = $i
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+                if (name == "") continue
+                if (length(name) > 64 || name !~ /^[A-Za-z0-9_.:-]+$/) exit 1
+                if (!seen[name]++) out = out (out ? "," : "") name
+            }
+        }
+        END {
+            if (length(out) > 255) exit 1
+            printf "%s", out
+        }
+    '
+}
+
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "[ERROR] 配置文件不存在: ${CONFIG_FILE}"
     exit 1
@@ -238,6 +297,7 @@ while IFS='=' read -r key value; do
         CU_NODE) CU_NODE="${value%\"}"; CU_NODE="${CU_NODE#\"}" ;;
         CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
         BD_NODE) BD_NODE="${value%\"}"; BD_NODE="${BD_NODE#\"}" ;;
+        INTERFACE) INTERFACE="${value%\"}"; INTERFACE="${INTERFACE#\"}" ;;
         RESET_DAY) RESET_DAY="${value%\"}"; RESET_DAY="${RESET_DAY#\"}" ;;
         AUTO_UPDATE) AUTO_UPDATE="${value%\"}"; AUTO_UPDATE="${AUTO_UPDATE#\"}" ;;
         CONFIG_MD5) CONFIG_MD5="${value%\"}"; CONFIG_MD5="${CONFIG_MD5#\"}" ;;
@@ -261,6 +321,7 @@ fi
 ACTIVE_INTERVAL="$REPORT_INTERVAL"
 [ "$COLLECT_INTERVAL" -gt 0 ] && ACTIVE_INTERVAL="$COLLECT_INTERVAL"
 CONFIG_MD5=${CONFIG_MD5:-none}
+INTERFACE=$(normalize_interface_list "${INTERFACE:-}") || INTERFACE=""
 
 log_ts() {
     date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S'
@@ -352,11 +413,11 @@ schedule_agent_update() {
     log_debug "Auto update requested: install_url=${install_url}"
 
     if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
-        systemd_output=$(systemd-run --unit="${SERVICE_NAME}-auto-update-${now}" /bin/bash -c 'set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" 2>&1)
+        systemd_output=$(systemd-run --unit="${SERVICE_NAME}-auto-update-${now}" /bin/bash -c 'sleep "$2"; set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" "$AUTO_UPDATE_DELAY_SECONDS" 2>&1)
         systemd_status=$?
         if [ "$systemd_status" -eq 0 ]; then
             printf '%s\n' "$now" > "$lock_file" 2>/dev/null || true
-            log_info "Auto update scheduled via systemd-run: unit=${SERVICE_NAME}-auto-update-${now}"
+            log_info "Auto update scheduled via systemd-run after ${AUTO_UPDATE_DELAY_SECONDS}s: unit=${SERVICE_NAME}-auto-update-${now}"
             log_debug "systemd-run output: ${systemd_output}"
             return 0
         fi
@@ -369,9 +430,9 @@ schedule_agent_update() {
     fi
 
     log_debug "Auto update scheduling via nohup: install_url=${install_url}"
-    nohup /bin/bash -c 'set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" >/dev/null 2>&1 &
+    nohup /bin/bash -c 'sleep "$2"; set -o pipefail; curl -fsSL --connect-timeout 5 -m 30 "$1" | bash -s install' _ "$install_url" "$AUTO_UPDATE_DELAY_SECONDS" >/dev/null 2>&1 &
     printf '%s\n' "$now" > "$lock_file" 2>/dev/null || true
-    log_info "Auto update scheduled"
+    log_info "Auto update scheduled after ${AUTO_UPDATE_DELAY_SECONDS}s"
     return 0
 }
 
@@ -385,8 +446,9 @@ persist_dynamic_config() {
         -v ct="$5" \
         -v cu="$6" \
         -v cm="$7" \
-        -v bd="$8" '
-        BEGIN { c=0; r=0; p=0; d=0; m=0; tct=0; tcu=0; tcm=0; tbd=0 }
+        -v bd="$8" \
+        -v iface="$9" '
+        BEGIN { c=0; r=0; p=0; d=0; m=0; tct=0; tcu=0; tcm=0; tbd=0; ni=0 }
         /^COLLECT_INTERVAL=/ { print "COLLECT_INTERVAL=\"" collect "\""; c=1; next }
         /^REPORT_INTERVAL=/ { print "REPORT_INTERVAL=\"" report "\""; r=1; next }
         /^RESET_DAY=/ { print "RESET_DAY=\"" reset "\""; d=1; next }
@@ -395,6 +457,7 @@ persist_dynamic_config() {
         /^CU_NODE=/ { print "CU_NODE=\"" cu "\""; tcu=1; next }
         /^CM_NODE=/ { print "CM_NODE=\"" cm "\""; tcm=1; next }
         /^BD_NODE=/ { print "BD_NODE=\"" bd "\""; tbd=1; next }
+        /^INTERFACE=/ { print "INTERFACE=\"" iface "\""; ni=1; next }
         { print }
         END {
             if (!c) print "COLLECT_INTERVAL=\"" collect "\""
@@ -405,6 +468,7 @@ persist_dynamic_config() {
             if (!tcu) print "CU_NODE=\"" cu "\""
             if (!tcm) print "CM_NODE=\"" cm "\""
             if (!tbd) print "BD_NODE=\"" bd "\""
+            if (!ni) print "INTERFACE=\"" iface "\""
         }
     ' "$CONFIG_FILE" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
     chmod 600 "$tmp_file" 2>/dev/null || true
@@ -413,7 +477,7 @@ persist_dynamic_config() {
 
 apply_remote_config() {
     local response_file="$1" header_file="$2" body bytes new_md5
-    local new_collect new_report new_reset new_schema new_ct new_cu new_cm new_bd
+    local new_collect new_report new_reset new_schema new_ct new_cu new_cm new_bd new_interface
     local new_rx_corr new_tx_corr new_update has_config
 
     bytes=$(wc -c < "$response_file" 2>/dev/null || echo 9999)
@@ -425,7 +489,7 @@ apply_remote_config() {
     log_debug "Remote config raw: bytes=${bytes} body=${body}"
     case "$body" in
         '') log_warn_debug "Remote config rejected: empty body"; return 1 ;;
-        *[!a-z0-9_=\&.\-:]*) log_warn_debug "Remote config rejected: invalid characters body=${body}"; return 1 ;;
+        *[!A-Za-z0-9_=\&.,:-]*) log_warn_debug "Remote config rejected: invalid characters body=${body}"; return 1 ;;
     esac
 
     new_rx_corr=""
@@ -443,6 +507,7 @@ apply_remote_config() {
             custom_cu)        new_cu="$_v" ;;
             custom_cm)        new_cm="$_v" ;;
             custom_bd)        new_bd="$_v" ;;
+            interface)        new_interface="$_v" ;;
             rx_correction)    new_rx_corr="$_v" ;;
             tx_correction)    new_tx_corr="$_v" ;;
             update)           new_update="$_v" ;;
@@ -452,10 +517,10 @@ apply_remote_config() {
     done
 
     has_config=0
-    if [ -n "${new_collect:-}" ] || [ -n "${new_report:-}" ] || [ -n "${new_reset:-}" ] || [ -n "${new_schema:-}" ]; then
+    if [ -n "${new_collect:-}" ] || [ -n "${new_report:-}" ] || [ -n "${new_reset:-}" ] || [ -n "${new_schema:-}" ] || [ -n "${new_interface:-}" ]; then
         has_config=1
     fi
-    log_debug "Remote config parsed: has_config=${has_config} update=${new_update:-} collect=${new_collect:-} report=${new_report:-} reset=${new_reset:-} schema=${new_schema:-} rx_corr=${new_rx_corr:-} tx_corr=${new_tx_corr:-}"
+    log_debug "Remote config parsed: has_config=${has_config} update=${new_update:-} collect=${new_collect:-} report=${new_report:-} reset=${new_reset:-} schema=${new_schema:-} interface=${new_interface:-} rx_corr=${new_rx_corr:-} tx_corr=${new_tx_corr:-}"
 
     if [ "$has_config" = "0" ]; then
         if [ "$new_update" = "1" ]; then
@@ -479,17 +544,18 @@ apply_remote_config() {
     case "$new_report" in 30|60|120|180) ;; *) log_warn_debug "Remote config rejected: invalid report_interval=${new_report:-}"; return 1 ;; esac
     case "$new_reset" in 0|[1-9]|1[0-9]|2[0-9]|30|31) ;; *) log_warn_debug "Remote config rejected: invalid reset_day=${new_reset:-}"; return 1 ;; esac
     case "$new_update" in ''|0|1) ;; *) log_warn_debug "Remote config rejected: invalid update=${new_update}"; return 1 ;; esac
-    if [ "$new_schema" != "2" ]; then
+    if [ "$new_schema" != "3" ]; then
         log_warn_debug "Remote config rejected: invalid schema_version=${new_schema:-}"
         return 1
     fi
+    new_interface=$(normalize_interface_list "${new_interface:-}") || { log_warn_debug "Remote config rejected: invalid interface=${new_interface:-}"; return 1; }
     if [ "$new_report" -lt "$new_collect" ]; then
         log_warn_debug "Remote config rejected: report_interval=${new_report} less than collect_interval=${new_collect}"
         return 1
     fi
 
     if [ "$new_md5" != "${CONFIG_MD5:-none}" ]; then
-        persist_dynamic_config "$new_collect" "$new_report" "$new_reset" "$new_md5" "$new_ct" "$new_cu" "$new_cm" "$new_bd" || return 1
+        persist_dynamic_config "$new_collect" "$new_report" "$new_reset" "$new_md5" "$new_ct" "$new_cu" "$new_cm" "$new_bd" "$new_interface" || return 1
         COLLECT_INTERVAL="$new_collect"
         REPORT_INTERVAL="$new_report"
         RESET_DAY="$new_reset"
@@ -497,10 +563,15 @@ apply_remote_config() {
         CU_NODE="$new_cu"
         CM_NODE="$new_cm"
         BD_NODE="$new_bd"
+        INTERFACE="$new_interface"
         CONFIG_MD5="$new_md5"
         ACTIVE_INTERVAL="$REPORT_INTERVAL"
         [ "$COLLECT_INTERVAL" -gt 0 ] && ACTIVE_INTERVAL="$COLLECT_INTERVAL"
-        log_info "Dynamic configuration applied: md5=${CONFIG_MD5} ct=${CT_NODE:-} cu=${CU_NODE:-} cm=${CM_NODE:-} bd=${BD_NODE:-}"
+        NET_STAT=$(get_net_bytes)
+        RX_PREV=$(echo "$NET_STAT" | awk '{print $1}'); RX_PREV=${RX_PREV:-0}
+        TX_PREV=$(echo "$NET_STAT" | awk '{print $2}'); TX_PREV=${TX_PREV:-0}
+        PREV_LOOP_TIME=$(date +%s)
+        log_info "Dynamic configuration applied: md5=${CONFIG_MD5} interface=${INTERFACE:-auto} ct=${CT_NODE:-} cu=${CU_NODE:-} cm=${CM_NODE:-} bd=${BD_NODE:-}"
 
         if kill -0 "$WORKER_PID" 2>/dev/null; then
             pkill -P "$WORKER_PID" 2>/dev/null || true
@@ -572,12 +643,15 @@ apply_traffic_correction() {
     rx_bytes=$(printf '%s' "$rx_val" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
     tx_bytes=$(printf '%s' "$tx_val" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
 
-    local saved_rx_prev=0 saved_tx_prev=0 saved_rx_period=0 saved_tx_period=0 saved_last_check=0 saved_period_start=0
+    local current_net current_rx current_tx
+    current_net=$(get_net_bytes)
+    current_rx=$(echo "$current_net" | awk '{print $1}'); current_rx=${current_rx:-0}
+    current_tx=$(echo "$current_net" | awk '{print $2}'); current_tx=${current_tx:-0}
+
+    local saved_rx_period=0 saved_tx_period=0 saved_last_check=0 saved_period_start=0
     if [ -f "${TRAFFIC_DATA_FILE}" ]; then
         while IFS='=' read -r key value; do
             case "$key" in
-                RX_PREV) saved_rx_prev="${value%%\"*}"; saved_rx_prev="${saved_rx_prev#\"}" ;;
-                TX_PREV) saved_tx_prev="${value%%\"*}"; saved_tx_prev="${saved_tx_prev#\"}" ;;
                 RX_PERIOD) saved_rx_period="${value%%\"*}"; saved_rx_period="${saved_rx_period#\"}" ;;
                 TX_PERIOD) saved_tx_period="${value%%\"*}"; saved_tx_period="${saved_tx_period#\"}" ;;
                 LAST_CHECK) saved_last_check="${value%%\"*}"; saved_last_check="${saved_last_check#\"}" ;;
@@ -595,12 +669,13 @@ apply_traffic_correction() {
 
     mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
     cat > "${TRAFFIC_DATA_FILE}.tmp" << EOF
-RX_PREV=${saved_rx_prev}
-TX_PREV=${saved_tx_prev}
+RX_PREV=${current_rx}
+TX_PREV=${current_tx}
 RX_PERIOD=${saved_rx_period}
 TX_PERIOD=${saved_tx_period}
 LAST_CHECK=${now_ts}
 PERIOD_START=${saved_period_start}
+INTERFACE=${INTERFACE:-}
 EOF
     mv "${TRAFFIC_DATA_FILE}.tmp" "${TRAFFIC_DATA_FILE}" 2>/dev/null || true
 }
@@ -615,6 +690,16 @@ escape_json() {
     echo -n "$val"
 }
 
+json_probe_value() {
+    local node="${1:-}"
+    local value="${2:-}"
+    if [ -z "$node" ]; then
+        printf 'false'
+    else
+        printf '"%s"' "$(escape_json "$value")"
+    fi
+}
+
 safe_div() {
     local num="${1:-0}"
     local den="${2:-0}"
@@ -623,12 +708,35 @@ safe_div() {
 }
 
 get_net_bytes() {
-    awk 'NR>2 && $1~/^(eth|en|wl)[a-z0-9]*:/{rx+=$2;tx+=$10}END{printf "%.0f %.0f\n",rx,tx}' /proc/net/dev 2>/dev/null || echo "0 0";
+    local interfaces="${INTERFACE:-}"
+    awk -v interfaces="$interfaces" '
+        BEGIN {
+            split(interfaces, parts, ",")
+            for (i in parts) if (parts[i] != "") wanted[parts[i]] = 1
+        }
+        NR > 2 {
+            iface = $1
+            sub(/:$/, "", iface)
+            if (interfaces != "") {
+                if (wanted[iface]) { rx += $2; tx += $10 }
+            } else if (iface ~ /^(eth|en|wl)[a-z0-9]*$/) {
+                rx += $2; tx += $10
+            }
+        }
+        END { printf "%.0f %.0f\n", rx + 0, tx + 0 }
+    ' /proc/net/dev 2>/dev/null || echo "0 0";
 }
 
 is_leap_year() {
     local year=$1
     [ $((year % 4)) -eq 0 ] && [ $((year % 100)) -ne 0 ] || [ $((year % 400)) -eq 0 ]
+}
+
+to_decimal() {
+    local value="${1:-0}"
+    value=$(printf '%s' "$value" | sed 's/^0*//')
+    case "$value" in ''|*[!0-9]*) value=0 ;; esac
+    printf '%s' "$value"
 }
 
 # 获取当月账单周期起始时间戳（UTC+0）
@@ -640,35 +748,39 @@ get_period_start_ts() {
     year=$(date -u -d "@${now_ts}" '+%Y' 2>/dev/null || date -u -r "${now_ts}" '+%Y' 2>/dev/null)
     month=$(date -u -d "@${now_ts}" '+%m' 2>/dev/null || date -u -r "${now_ts}" '+%m' 2>/dev/null)
     day=$(date -u -d "@${now_ts}" '+%d' 2>/dev/null || date -u -r "${now_ts}" '+%d' 2>/dev/null)
+    month=$(to_decimal "$month")
+    day=$(to_decimal "$day")
     
-    local target_day="$reset_day"
+    local target_day month_str
+    target_day=$(to_decimal "$reset_day")
+    month_str=$(printf "%02d" "$month")
     case "$month" in
-        02) 
+        2) 
             if is_leap_year "$year"; then
                 [ "$target_day" -gt 29 ] && target_day=29
             else
                 [ "$target_day" -gt 28 ] && target_day=28
             fi
             ;;
-        04|06|09|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
+        4|6|9|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
     esac
     
     local period_start_ts
     if [ "$day" -ge "$target_day" ]; then
-        period_start_ts=$(date -u -d "${year}-${month}-${target_day} 00:00:00" '+%s' 2>/dev/null || date -u -r "${now_ts}" '+%s' 2>/dev/null)
+        period_start_ts=$(date -u -d "${year}-${month_str}-${target_day} 00:00:00" '+%s' 2>/dev/null || date -u -r "${now_ts}" '+%s' 2>/dev/null)
     else
         local prev_month=$((month - 1))
         [ "$prev_month" -eq 0 ] && { prev_month=12; year=$((year - 1)); }
         local prev_month_str=$(printf "%02d" "$prev_month")
         case "$prev_month" in
-            02) 
+            2) 
                 if is_leap_year "$year"; then
                     [ "$target_day" -gt 29 ] && target_day=29
                 else
                     [ "$target_day" -gt 28 ] && target_day=28
                 fi
                 ;;
-            04|06|09|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
+            4|6|9|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
         esac
         period_start_ts=$(date -u -d "${year}-${prev_month_str}-${target_day} 00:00:00" '+%s' 2>/dev/null || date -u -r "${now_ts}" '+%s' 2>/dev/null)
     fi
@@ -686,9 +798,9 @@ calc_monthly_traffic() {
     mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
     
     # 读取上次保存的数据（使用临时变量避免与全局变量冲突）
-    local saved_rx_prev=0 saved_tx_prev=0 saved_rx_period=0 saved_tx_period=0 saved_last_check=0 saved_period_start=0
+    local saved_rx_prev=0 saved_tx_prev=0 saved_rx_period=0 saved_tx_period=0 saved_last_check=0 saved_period_start=0 saved_interface=""
     if [ -f "${TRAFFIC_DATA_FILE}" ]; then
-        local tmp_rx_prev tmp_tx_prev tmp_rx_period tmp_tx_period tmp_last_check tmp_period_start
+        local tmp_rx_prev tmp_tx_prev tmp_rx_period tmp_tx_period tmp_last_check tmp_period_start tmp_interface
         while IFS='=' read -r key value; do
             case "$key" in
                 RX_PREV) tmp_rx_prev="$value" ;;
@@ -697,16 +809,25 @@ calc_monthly_traffic() {
                 TX_PERIOD) tmp_tx_period="$value" ;;
                 LAST_CHECK) tmp_last_check="$value" ;;
                 PERIOD_START) tmp_period_start="$value" ;;
+                INTERFACE) tmp_interface="$value" ;;
             esac
         done < "${TRAFFIC_DATA_FILE}"
         saved_rx_prev=${tmp_rx_prev:-0}; saved_tx_prev=${tmp_tx_prev:-0}
         saved_rx_period=${tmp_rx_period:-0}; saved_tx_period=${tmp_tx_period:-0}
         saved_last_check=${tmp_last_check:-0}; saved_period_start=${tmp_period_start:-0}
+        saved_interface=${tmp_interface:-}
+    fi
+
+    if [ "${saved_interface}" != "${INTERFACE:-}" ]; then
+        saved_rx_prev=0; saved_tx_prev=0
+        saved_rx_period=0; saved_tx_period=0
+        saved_last_check=0; saved_period_start=0
     fi
     
     # 计算当前账单周期起始
     local period_start_ts
     period_start_ts=$(get_period_start_ts "$reset_day" "$now_ts")
+    case "$period_start_ts" in ''|*[!0-9]*) period_start_ts=0 ;; esac
     
     # 检测是否是首次运行（没有历史记录）
     local rx_delta=0 tx_delta=0
@@ -740,6 +861,7 @@ RX_PERIOD=${saved_rx_period}
 TX_PERIOD=${saved_tx_period}
 LAST_CHECK=${now_ts}
 PERIOD_START=${period_start_ts}
+INTERFACE=${INTERFACE:-}
 EOF
     mv "${TRAFFIC_DATA_FILE}.tmp" "${TRAFFIC_DATA_FILE}" 2>/dev/null || true
     
@@ -760,34 +882,93 @@ json_string_or_null() {
     fi
 }
 
+normalize_gpu_name() {
+    local gpu_name="${1:-}"
+    case "${gpu_name}" in
+        *Intel*|*intel*|*INTEL*)
+            case "${gpu_name}" in
+                *Arc*|*ARC*|*arc*) printf '%s' "${gpu_name}" ;;
+                *) printf '%s' "Intel Integrated Graphics" ;;
+            esac
+            ;;
+        *) printf '%s' "${gpu_name}" ;;
+    esac
+}
+
 get_gpu_metrics() {
-    local gpu_usage=""
-    local gpu_info=""
-    local line=""
+    local gpu_info_array=null
+    local gpu_count=0
 
     if command -v nvidia-smi >/dev/null 2>&1; then
-        line=$(nvidia-smi --query-gpu=name,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1 || true)
-        if [ -n "${line}" ]; then
-            gpu_info=$(echo "${line}" | awk -F',' '{gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1}')
-            gpu_usage=$(echo "${line}" | awk -F',' '{gsub(/[^0-9.]/, "", $2); print $2}')
+        local nvidia_output
+        nvidia_output=$(nvidia-smi --query-gpu=index,name,utilization.gpu --format=csv,noheader,nounits 2>/dev/null || true)
+        if [ -n "${nvidia_output}" ]; then
+            while IFS= read -r nvidia_line; do
+                [ -z "${nvidia_line}" ] && continue
+                # GPU name may contain commas, so parse from both ends:
+                # index is first token, utilization.gpu is last token, everything in between is name
+                local gpu_idx gpu_name gpu_util
+                gpu_idx=$(echo "${nvidia_line}" | awk -F',' '{gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1}')
+                gpu_util=$(echo "${nvidia_line}" | awk -F',' '{gsub(/[^0-9.]/, "", $NF); print $NF}')
+                # Extract name: strip first field (index) and last field (utilization), trim commas and spaces
+                gpu_name=$(echo "${nvidia_line}" | sed 's/^[^,]*,//; s/,[^,]*$//' | sed 's/^[ \t]*//;s/[ \t]*$//')
+                case "${gpu_util}" in ''|*[!0-9.]*|*.*.*) gpu_util="null" ;; esac
+                local gpu_name_escaped
+                gpu_name_escaped=$(escape_json "${gpu_name}")
+                if [ "${gpu_info_array}" != "null" ]; then
+                    gpu_info_array="${gpu_info_array},{\"name\":\"${gpu_name_escaped}\",\"info\":${gpu_util},\"id\":\"${gpu_idx}\"}"
+                else
+                    gpu_info_array="{\"name\":\"${gpu_name_escaped}\",\"info\":${gpu_util},\"id\":\"${gpu_idx}\"}"
+                fi
+                gpu_count=$((gpu_count + 1))
+            done <<< "${nvidia_output}"
         fi
     elif command -v rocm-smi >/dev/null 2>&1; then
-        gpu_info=$(rocm-smi --showproductname 2>/dev/null | awk -F: '/Card series|Card model|Product Name/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' || true)
-        gpu_usage=$(rocm-smi --showuse 2>/dev/null | awk -F: '/GPU use/{gsub(/[^0-9.]/, "", $2); print $2; exit}' || true)
+        local rocm_names rocm_utils
+        rocm_names=$(rocm-smi --showproductname 2>/dev/null | awk -F: '/Card series|Card model|Product Name/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' || true)
+        rocm_utils=$(rocm-smi --showuse 2>/dev/null | awk -F: '/GPU use/{gsub(/[^0-9.]/, "", $2); print $2}' || true)
+        local idx=0
+        while IFS= read -r rname; do
+            [ -z "${rname}" ] && continue
+            local rutil
+            rutil=$(echo "${rocm_utils}" | sed -n "$((idx + 1))p")
+            case "${rutil}" in ''|*[!0-9.]*|*.*.*) rutil="null" ;; esac
+            local rname_escaped
+            rname_escaped=$(escape_json "${rname}")
+            if [ "${gpu_info_array}" != "null" ]; then
+                gpu_info_array="${gpu_info_array},{\"name\":\"${rname_escaped}\",\"info\":${rutil},\"id\":\"${idx}\"}"
+            else
+                gpu_info_array="{\"name\":\"${rname_escaped}\",\"info\":${rutil},\"id\":\"${idx}\"}"
+            fi
+            idx=$((idx + 1))
+            gpu_count=$((gpu_count + 1))
+        done <<< "${rocm_names}"
     fi
 
-    if [ -z "${gpu_info}" ] && command -v lspci >/dev/null 2>&1; then
-        gpu_info=$(lspci 2>/dev/null | awk '/VGA compatible controller|3D controller|Display controller/ && /NVIDIA|AMD|ATI|Radeon|Intel.*(Graphics|Arc|UHD|Iris)/{sub(/^[^:]*: /, ""); print; exit}' || true)
+    # lspci fallback: only when no GPU detected via nvidia-smi/rocm-smi
+    if [ "${gpu_count}" -eq 0 ] && command -v lspci >/dev/null 2>&1; then
+        local lspci_gpus
+        lspci_gpus=$(lspci 2>/dev/null | awk '/VGA compatible controller|3D controller|Display controller/ && /NVIDIA|AMD|ATI|Radeon|Intel.*(Graphics|Arc|UHD|Iris)/{sub(/^.*: /, ""); print}' || true)
+        local lidx=0
+        while IFS= read -r lgpu; do
+            [ -z "${lgpu}" ] && continue
+            lgpu=$(normalize_gpu_name "${lgpu}")
+            local lgpu_escaped
+            lgpu_escaped=$(escape_json "${lgpu}")
+            if [ "${gpu_info_array}" != "null" ]; then
+                gpu_info_array="${gpu_info_array},{\"name\":\"${lgpu_escaped}\",\"info\":0,\"id\":\"${lidx}\"}"
+            else
+                gpu_info_array="{\"name\":\"${lgpu_escaped}\",\"info\":0,\"id\":\"${lidx}\"}"
+            fi
+            lidx=$((lidx + 1))
+            gpu_count=$((gpu_count + 1))
+        done <<< "${lspci_gpus}"
     fi
 
-    case "${gpu_usage}" in
-        ''|*[!0-9.]*|*.*.*) gpu_usage="null" ;;
-    esac
-
-    if [ -n "${gpu_info}" ]; then
-        printf '%s\n%s\n' "${gpu_usage:-null}" "$(json_string_or_null "${gpu_info}")"
+    if [ "${gpu_count}" -gt 0 ]; then
+        printf '[%s]' "${gpu_info_array}"
     else
-        printf 'null\nnull\n'
+        printf 'null'
     fi
 }
 
@@ -877,18 +1058,27 @@ get_probe() {
     port="${probe_target##* }"
 
     if has_nc_zero_io && get_time_ms >/dev/null 2>&1; then
-        local ok=0 total_rtt=0 i=1 rtt
+        local ok=0 values="" i=1 rtt
         while [ "$i" -le "$count" ]; do
             rtt=$(get_tcp_ping_nc "$host" "$port" 2>/dev/null)
             if [ -n "$rtt" ]; then
                 ok=$((ok + 1))
-                total_rtt=$((total_rtt + rtt))
+                values="$values $rtt"
             fi
             i=$((i + 1))
         done
         if [ "$ok" -gt 0 ]; then
-            local _avg=$((total_rtt / ok)) _loss=$(( (count - ok) * 100 / count ))
-            echo "$_avg $_loss"
+            local sorted median_val n=$ok
+            sorted=$(echo "$values" | tr ' ' '\n' | grep -v '^$' | sort -n)
+            if [ $((n % 2)) -eq 1 ]; then
+                median_val=$(echo "$sorted" | sed -n "$(( (n + 1) / 2 ))p")
+            else
+                local a b
+                a=$(echo "$sorted" | sed -n "$(( n / 2 ))p")
+                b=$(echo "$sorted" | sed -n "$(( n / 2 + 1 ))p")
+                median_val=$(( (a + b) / 2 ))
+            fi
+            echo "$median_val $(( (count - ok) * 100 / count ))"
         else
             log_debug "[get_probe] $host TCP all failed: ok=0 -> output 'null 100'"
             echo "null 100"
@@ -930,6 +1120,17 @@ write_probe_result() {
     fi
 }
 
+get_cf_trace_ip() {
+    local curl_family="$1"
+    local ip_value
+    ip_value=$(curl "$curl_family" --noproxy cloudflare.com -s -m 5 --connect-timeout 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '$1 == "ip" { print $2; exit }') || ip_value=""
+    if [ -n "$ip_value" ]; then
+        printf '%s\n' "$ip_value"
+    else
+        printf '0\n'
+    fi
+}
+
 # Centos限制，所以改成串行执行
 refresh_probe_async() {
     [ -n "$CT_NODE" ] && write_probe_result /dev/shm/.cf_probe_ct get_probe "$CT_NODE" 4 443
@@ -956,8 +1157,8 @@ run_network_worker() {
         
         # 10分钟检测一次 IP
         if [ $((now - last_ip)) -ge 600 ] || [ "$last_ip" -eq 0 ]; then
-            (curl -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > /dev/shm/.cf_ipv4.tmp && mv /dev/shm/.cf_ipv4.tmp /dev/shm/.cf_ipv4 || true
-            (if ip -6 route show default >/dev/null 2>&1; then curl -6 -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0"; else echo "0"; fi) > /dev/shm/.cf_ipv6.tmp && mv /dev/shm/.cf_ipv6.tmp /dev/shm/.cf_ipv6 || true
+            get_cf_trace_ip "-4" > /dev/shm/.cf_ipv4.tmp && mv /dev/shm/.cf_ipv4.tmp /dev/shm/.cf_ipv4 || true
+            (if ip -6 route show default >/dev/null 2>&1; then get_cf_trace_ip "-6"; else echo "0"; fi) > /dev/shm/.cf_ipv6.tmp && mv /dev/shm/.cf_ipv6.tmp /dev/shm/.cf_ipv6 || true
             last_ip="$now"
         fi
         
@@ -981,13 +1182,26 @@ PREV_CPU_IDLE=$(echo "$CPU_STAT" | awk '{print $2}'); PREV_CPU_IDLE=${PREV_CPU_I
 
 PREV_LOOP_TIME=$(date +%s)
 
+# 缓存间隔定义
+DISK_CHECK_INTERVAL=120          # 硬盘检测：2分钟
+LAST_DISK_CHECK=0
+# 状态检测：固定60秒
+STATUS_CHECK_INTERVAL=60
+LAST_STATUS_CHECK=0
+
+# set -u 安全初始化：所有缓存变量在循环前初始化为默认值
+DISK_TOTAL=0; DISK_USED=0
+OS=""; ARCH=""; KERNEL_VERSION=""; BOOT_TIME=0; CPU_INFO=""; CPU_CORES=1
+GPU_INFO_VALUE="null"; LOAD_AVG="0 0 0"; PROCESSES=0; TCP_CONN=0; UDP_CONN=0
+RX_MONTHLY=0; TX_MONTHLY=0
+
 if [ -z "${SERVER_ID:-}" ] || [ -z "${SECRET:-}" ] || [ -z "${WORKER_URL:-}" ]; then
     echo "[ERROR] $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S') 配置缺失: SERVER_ID/SECRET/WORKER_URL 不能为空"
     exit 1
 fi
 
 log_info "CF-Server-Monitor Probe Engine Started Successfully."
-log_debug "Config: id=${SERVER_ID} url=${WORKER_URL} report_interval=${REPORT_INTERVAL}s collect_interval=${COLLECT_INTERVAL}s active_interval=${ACTIVE_INTERVAL}s reset_day=${RESET_DAY} auto_update=${AUTO_UPDATE} secret_len=${#SECRET}"
+log_debug "Config: id=${SERVER_ID} url=${WORKER_URL} report_interval=${REPORT_INTERVAL}s collect_interval=${COLLECT_INTERVAL}s active_interval=${ACTIVE_INTERVAL}s reset_day=${RESET_DAY} interface=${INTERFACE:-auto} auto_update=${AUTO_UPDATE} secret_len=${#SECRET}"
 log_debug "Nodes: ct=${CT_NODE:-} cu=${CU_NODE:-} cm=${CM_NODE:-} bd=${BD_NODE:-}"
 
 # 核心架构升级：在这里脱离主循环，静默启动常驻网络 Worker 协程，无 wait 干扰
@@ -1027,25 +1241,35 @@ while true; do
     SWAP_USED=$(((SWAP_TOTAL_KB - SWAP_FREE_KB) / 1024))
     [ "${SWAP_USED}" -lt 0 ] && SWAP_USED=0
 
-    # 统计所有数据分区的总容量和使用量（排除引导、光驱、Snap等）
-    DISK_TOTAL=0; DISK_USED=0
-    DISK_STATS=$(df -kP 2>/dev/null | awk '
-        NR>1 &&
-        $1 !~ /^\/dev\/loop/ &&
-        $6 !~ /^(\/boot|\/boot\/efi|\/snap|\/var\/snap)/ &&
-        $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs)/ &&
-        $1 ~ /^\/dev\// { 
-            total+=$2; used+=$3
-        } 
-        END {print total, used}
-    ')
+    # 统计本地数据分区的总容量和使用量（排除引导、光驱、Snap、NAS/NFS等远端挂载）
+    # 缓存机制：每2分钟检测一次
+    if [ $((LOOP_START_TIME - LAST_DISK_CHECK)) -ge "${DISK_CHECK_INTERVAL}" ] || [ "${LAST_DISK_CHECK}" -eq 0 ]; then
+        DISK_TOTAL=0; DISK_USED=0
+        DISK_STATS=$(df -kP 2>/dev/null | awk '
+            NR>1 &&
+            $6 !~ /^(\/boot|\/boot\/efi|\/snap|\/var\/snap)/ &&
+            $1 !~ /^(tmpfs|devtmpfs|overlay|squashfs|none)$/ &&
+            $1 !~ /^\/dev\/loop/ &&
+            $1 ~ /^\/dev\// &&
+            $6 !~ /^(\/proc|\/sys|\/dev|\/run)$/ &&
+            $2 ~ /^[0-9]+$/ &&
+            $3 ~ /^[0-9]+$/ &&
+            $2 + 0 > 0 &&
+            !seen[$1]++ {
+                total+=$2; used+=$3
+            } 
+            END {print total, used}
+        ')
 
-    if [ -n "${DISK_STATS}" ]; then
-        DISK_TOTAL=$(echo "${DISK_STATS}" | awk '{print int($1/1024)}')
-        DISK_USED=$(echo "${DISK_STATS}" | awk '{print int($2/1024)}')
+        if [ -n "${DISK_STATS}" ]; then
+            DISK_TOTAL=$(echo "${DISK_STATS}" | awk '{print int($1/1024)}')
+            DISK_USED=$(echo "${DISK_STATS}" | awk '{print int($2/1024)}')
+        fi
+
+        LAST_DISK_CHECK="${LOOP_START_TIME}"
     fi
 
-    # CPU 核心利用率计算
+    # CPU 核心利用率计算（每循环都执行，因为需要实时计算增量）
     CPU_STAT=$(get_cpu_stat)
     CPU_TOTAL_NOW=$(echo "$CPU_STAT" | awk '{print $1}'); CPU_TOTAL_NOW=${CPU_TOTAL_NOW:-0}
     CPU_IDLE_NOW=$(echo "$CPU_STAT" | awk '{print $2}'); CPU_IDLE_NOW=${CPU_IDLE_NOW:-0}
@@ -1060,71 +1284,74 @@ while true; do
     PREV_CPU_TOTAL=${CPU_TOTAL_NOW}
     PREV_CPU_IDLE=${CPU_IDLE_NOW}
 
-    # 基础静态/准静态元数据安全解析
-    if [ -f /etc/os-release ]; then
-        OS_RAW=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
-    else
-        OS_RAW=$(uname -srm)
-    fi
-    OS=${OS_RAW:-"Linux"}
-    ARCH=$(uname -m)
-    BOOT_TIME=$(awk '$1=="btime"{print $2}' /proc/stat 2>/dev/null)
-    if [ -n "${BOOT_TIME:-}" ]; then
-        BOOT_TIME=$((BOOT_TIME * 1000))
-    else
-        uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
-        now_sec=$(date +%s)
-
-        if [ "$uptime_sec" -gt 0 ] 2>/dev/null; then
-            BOOT_TIME=$(( (now_sec - uptime_sec) * 1000 ))
+    # 基础静态/准静态元数据安全解析（首次运行时获取，运行时不会变化）
+    if [ "${LAST_STATUS_CHECK}" -eq 0 ]; then
+        if [ -f /etc/os-release ]; then
+            OS_RAW=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
         else
-            BOOT_TIME=0
+            OS_RAW=$(uname -srm)
         fi
-    fi
-    CPU_INFO=$(grep -m 1 'model name' /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | xargs || echo "")
-    [ -z "${CPU_INFO}" ] && CPU_INFO=${ARCH}
-    CPU_CORES=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1")
-    GPU_METRICS=$(get_gpu_metrics)
-    GPU=$(echo "$GPU_METRICS" | awk 'NR==1{print $1}'); GPU=${GPU:-null}
-    GPU_INFO_VALUE=$(echo "$GPU_METRICS" | awk 'NR==2{print}')
-    [ -z "${GPU_INFO_VALUE}" ] && GPU_INFO_VALUE="null"
-    LOAD_AVG=$(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null); LOAD_AVG=${LOAD_AVG:-"0 0 0"}
-    PROCESSES=$(ps -e 2>/dev/null | wc -l || echo 0)
+        OS=${OS_RAW:-"Linux"}
+        ARCH=$(uname -m)
+        KERNEL_VERSION=$(uname -r 2>/dev/null || echo "")
+        BOOT_TIME=$(awk '$1=="btime"{print $2}' /proc/stat 2>/dev/null)
+        if [ -n "${BOOT_TIME:-}" ]; then
+            BOOT_TIME=$((BOOT_TIME * 1000))
+        else
+            uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+            now_sec=$(date +%s)
 
-    # ---------------- TCP ----------------
-    TCP_CONN=""
-
-    if command -v ss >/dev/null 2>&1; then
-        # 只统计真正“活跃连接”
-        TCP_CONN=$(ss -H -ant state established 2>/dev/null | wc -l)
-    else
-        # /proc fallback：只算 ESTABLISHED (st=01)
-        TCP_CONN=$(awk 'NR>1 && $4=="01"{c++} END{print c+0}' /proc/net/tcp 2>/dev/null)
-    fi
-
-    TCP_CONN=$(printf "%s" "${TCP_CONN:-0}" | tr -d '\r\n ')
-
-
-    # ---------------- UDP ----------------
-    UDP_CONN=""
-
-    if command -v ss >/dev/null 2>&1; then
-        UDP_CONN=$(ss -H -anu 2>/dev/null | wc -l)
-    else
-        UDP_CONN=$(awk 'NR>1{c++} END{print c+0}' /proc/net/udp 2>/dev/null)
+            if [ "$uptime_sec" -gt 0 ] 2>/dev/null; then
+                BOOT_TIME=$(( (now_sec - uptime_sec) * 1000 ))
+            else
+                BOOT_TIME=0
+            fi
+        fi
+        CPU_INFO=$(grep -m 1 'model name' /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | xargs || echo "")
+        [ -z "${CPU_INFO}" ] && CPU_INFO=${ARCH}
+        CPU_CORES=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1")
     fi
 
-    UDP_CONN=$(printf "%s" "${UDP_CONN:-0}" | tr -d '\r\n ')
-
-    # ------------------ 精确无干扰时钟网速算法 ------------------
+    # 获取网络字节数（网速计算需要每次执行，流量统计也需要）
     NET_STAT=$(get_net_bytes)
     RX_NOW=$(echo "$NET_STAT" | awk '{print $1}'); RX_NOW=${RX_NOW:-0}
     TX_NOW=$(echo "$NET_STAT" | awk '{print $2}'); TX_NOW=${TX_NOW:-0}
-    
-    # 计算当月累计流量
-    MONTHLY_TRAFFIC=$(calc_monthly_traffic "$RX_NOW" "$TX_NOW")
-    RX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $1}')
-    TX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $2}')
+
+    # 状态检测缓存：进程数、连接数、GPU使用率、负载、当月累计流量（每STATUS_CHECK_INTERVAL检测一次）
+    if [ $((LOOP_START_TIME - LAST_STATUS_CHECK)) -ge "${STATUS_CHECK_INTERVAL}" ] || [ "${LAST_STATUS_CHECK}" -eq 0 ]; then
+        GPU_INFO_VALUE=$(get_gpu_metrics)
+        [ -z "${GPU_INFO_VALUE}" ] && GPU_INFO_VALUE="null"
+        LOAD_AVG=$(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null); LOAD_AVG=${LOAD_AVG:-"0 0 0"}
+        PROCESSES=$(ps -e 2>/dev/null | wc -l || echo 0)
+
+        # ---------------- TCP ----------------
+        TCP_CONN=""
+        if command -v ss >/dev/null 2>&1; then
+            TCP_CONN=$(ss -H -ant state established 2>/dev/null | wc -l)
+        else
+            TCP_CONN=$(awk 'NR>1 && $4=="01"{c++} END{print c+0}' /proc/net/tcp 2>/dev/null)
+        fi
+        TCP_CONN=$(printf "%s" "${TCP_CONN:-0}" | tr -d '\r\n ')
+
+        # ---------------- UDP ----------------
+        UDP_CONN=""
+        if command -v ss >/dev/null 2>&1; then
+            UDP_CONN=$(ss -H -anu 2>/dev/null | wc -l)
+        else
+            UDP_CONN=$(awk 'NR>1{c++} END{print c+0}' /proc/net/udp 2>/dev/null)
+        fi
+        UDP_CONN=$(printf "%s" "${UDP_CONN:-0}" | tr -d '\r\n ')
+
+        # 计算当月累计流量
+        MONTHLY_TRAFFIC=$(calc_monthly_traffic "$RX_NOW" "$TX_NOW")
+        RX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $1}')
+        TX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $2}')
+
+        LAST_STATUS_CHECK="${LOOP_START_TIME}"
+    fi
+
+    # ------------------ 精确无干扰时钟网速算法 ------------------
+    # NET_STAT/RX_NOW/TX_NOW 已在缓存块中提前获取
     
     TIME_DELTA=$((LOOP_START_TIME - PREV_LOOP_TIME))
     [ "${TIME_DELTA}" -le 0 ] && TIME_DELTA=${ACTIVE_INTERVAL}
@@ -1153,15 +1380,28 @@ while true; do
     EOS=$(escape_json "${OS}")
     EARCH=$(escape_json "${ARCH}")
     ECPU=$(escape_json "${CPU_INFO}")
+    EKERNEL=$(escape_json "${KERNEL_VERSION}")
+    PING_CT_JSON=$(json_probe_value "$CT_NODE" "$PING_CT")
+    PING_CU_JSON=$(json_probe_value "$CU_NODE" "$PING_CU")
+    PING_CM_JSON=$(json_probe_value "$CM_NODE" "$PING_CM")
+    PING_BD_JSON=$(json_probe_value "$BD_NODE" "$PING_BD")
+    LOSS_CT_JSON=$(json_probe_value "$CT_NODE" "$LOSS_CT")
+    LOSS_CU_JSON=$(json_probe_value "$CU_NODE" "$LOSS_CU")
+    LOSS_CM_JSON=$(json_probe_value "$CM_NODE" "$LOSS_CM")
+    LOSS_BD_JSON=$(json_probe_value "$BD_NODE" "$LOSS_BD")
 
     METRICS_JSON=$(cat <<EOF
-{"cpu":"$CPU","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","gpu":$GPU,"gpu_info":$GPU_INFO_VALUE,"processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD","loss_ct":"$LOSS_CT","loss_cu":"$LOSS_CU","loss_cm":"$LOSS_CM","loss_bd":"$LOSS_BD"}
+{"cpu":"$CPU","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","kernel_version":"$EKERNEL","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","gpu_info":$GPU_INFO_VALUE,"processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":$PING_CT_JSON,"ping_cu":$PING_CU_JSON,"ping_cm":$PING_CM_JSON,"ping_bd":$PING_BD_JSON,"loss_ct":$LOSS_CT_JSON,"loss_cu":$LOSS_CU_JSON,"loss_cm":$LOSS_CM_JSON,"loss_bd":$LOSS_BD_JSON}
+EOF
+)
+    SAMPLE_METRICS_JSON=$(cat <<EOF
+{"cpu":"$CPU","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED"}
 EOF
 )
     # 上报上游数据端 (限定 4s 超时控制，主循环绝不严重漂移)
     if [ "$COLLECT_INTERVAL" -gt 0 ]; then
         SAMPLE_TS=$((LOOP_START_TIME * 1000))
-        SAMPLE_JSON="{\"ts\":$SAMPLE_TS,\"metrics\":$METRICS_JSON}"
+        SAMPLE_JSON="{\"ts\":$SAMPLE_TS,\"metrics\":$SAMPLE_METRICS_JSON}"
         if [ -z "$SAMPLES_JSON" ]; then
             SAMPLES_JSON="$SAMPLE_JSON"
         else
@@ -1191,7 +1431,7 @@ EOF
         REPORT_HEADERS=""
         REPORT_HTTP_CODE=$(curl -sS -D "$REPORT_HEADER_FILE" -o "$REPORT_RESPONSE_FILE" -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
-            -H "X-Agent-Config-Schema: 2" \
+            -H "X-Agent-Config-Schema: 3" \
             -H "X-Agent-Version: ${AGENT_VERSION}" \
             -H "X-Agent-Config-Md5: ${CONFIG_MD5:-none}" \
             -d "$PAYLOAD" -m 8 --connect-timeout 3 "$WORKER_URL" 2>"$REPORT_ERROR_FILE")
@@ -1320,6 +1560,7 @@ install_probe() {
     CU_NODE=""
     CM_NODE=""
     BD_NODE=""
+    INTERFACE=""
     RESET_DAY=""
     AUTO_UPDATE=""
     RX_CORRECTION=""
@@ -1338,6 +1579,7 @@ install_probe() {
             -cu=*) CU_NODE="${arg#-cu=}" ;;
             -cm=*) CM_NODE="${arg#-cm=}" ;;
             -bd=*) BD_NODE="${arg#-bd=}" ;;
+            -interface=*|-interfaces=*|-iface=*) INTERFACE="${arg#*=}" ;;
             -reset_day=*) RESET_DAY="${arg#-reset_day=}" ;;
             -auto_update=*|-auto-update=*) AUTO_UPDATE=$(normalize_binary_value "${arg#*=}") || error "auto_update 参数非法，仅支持 0 或 1" ;;
             -rx_correction=*) RX_CORRECTION="${arg#-rx_correction=}" ;;
@@ -1362,6 +1604,7 @@ install_probe() {
             [ -z "$RESET_DAY" ] && RESET_DAY=1
             AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
             DEBUG_MODE=$(normalize_binary_value "$DEBUG_MODE" 0) || error "debug 参数非法，仅支持 0 或 1"
+            INTERFACE=$(normalize_interface_list "${INTERFACE:-}") || error "interface 参数非法，请使用英文逗号分隔的网卡名"
 
             step "更新配置文件..."
             cat > "${CONFIG_FILE}" << EOF
@@ -1374,6 +1617,7 @@ CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
 BD_NODE="${BD_NODE:-}"
+INTERFACE="${INTERFACE:-}"
 RESET_DAY="${RESET_DAY}"
 AUTO_UPDATE="${AUTO_UPDATE}"
 CONFIG_MD5="none"
@@ -1393,6 +1637,7 @@ EOF
                     CU_NODE) CU_NODE="${value%\"}"; CU_NODE="${CU_NODE#\"}" ;;
                     CM_NODE) CM_NODE="${value%\"}"; CM_NODE="${CM_NODE#\"}" ;;
                     BD_NODE) BD_NODE="${value%\"}"; BD_NODE="${BD_NODE#\"}" ;;
+                    INTERFACE) INTERFACE="${value%\"}"; INTERFACE="${INTERFACE#\"}" ;;
                     RESET_DAY) RESET_DAY="${value%\"}"; RESET_DAY="${RESET_DAY#\"}" ;;
                     AUTO_UPDATE) AUTO_UPDATE="${value%\"}"; AUTO_UPDATE="${AUTO_UPDATE#\"}" ;;
                     CONFIG_MD5) CONFIG_MD5="${value%\"}"; CONFIG_MD5="${CONFIG_MD5#\"}" ;;
@@ -1409,6 +1654,7 @@ EOF
         [ -z "$RESET_DAY" ] && RESET_DAY=1
         AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
         DEBUG_MODE=$(normalize_binary_value "$DEBUG_MODE" 0) || error "debug 参数非法，仅支持 0 或 1"
+        INTERFACE=$(normalize_interface_list "${INTERFACE:-}") || error "interface 参数非法，请使用英文逗号分隔的网卡名"
 
         step "创建配置目录..."
         mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
@@ -1434,6 +1680,7 @@ CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
 BD_NODE="${BD_NODE:-}"
+INTERFACE="${INTERFACE:-}"
 RESET_DAY="${RESET_DAY}"
 AUTO_UPDATE="${AUTO_UPDATE}"
 CONFIG_MD5="none"
@@ -1447,6 +1694,7 @@ EOF
     AUTO_UPDATE=$(normalize_binary_value "$AUTO_UPDATE" 0) || error "auto_update 参数非法，仅支持 0 或 1"
     DEBUG_MODE=$(normalize_binary_value "$DEBUG_MODE" 0) || error "debug 参数非法，仅支持 0 或 1"
     CONFIG_MD5=${CONFIG_MD5:-none}
+    INTERFACE=$(normalize_interface_list "${INTERFACE:-}") || error "interface 参数非法，请使用英文逗号分隔的网卡名"
 
     if [ -n "${RX_CORRECTION}" ] || [ -n "${TX_CORRECTION}" ]; then
         step "应用流量校正..."
@@ -1455,8 +1703,10 @@ EOF
         mkdir -p "${CONFIG_DIR}" 2>/dev/null || true
         local now_ts=$(date '+%s')
         local rx_correction_bytes=0 tx_correction_bytes=0
-        local current_rx=$(awk 'NR>2 && $1~/^(eth|en|wl)[a-z0-9]*:/{rx+=$2}END{printf "%.0f", rx}' /proc/net/dev 2>/dev/null || echo 0)
-        local current_tx=$(awk 'NR>2 && $1~/^(eth|en|wl)[a-z0-9]*:/{tx+=$10}END{printf "%.0f", tx}' /proc/net/dev 2>/dev/null || echo 0)
+        local current_net current_rx current_tx
+        current_net=$(get_configured_net_bytes "${INTERFACE:-}")
+        current_rx=$(echo "$current_net" | awk '{print $1}'); current_rx=${current_rx:-0}
+        current_tx=$(echo "$current_net" | awk '{print $2}'); current_tx=${current_tx:-0}
         [ -n "${RX_CORRECTION}" ] && rx_correction_bytes=$(echo "${RX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
         [ -n "${TX_CORRECTION}" ] && tx_correction_bytes=$(echo "${TX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
         [ -n "${RX_CORRECTION}" ] && info "下行流量校正: ${RX_CORRECTION}GB"
@@ -1469,6 +1719,7 @@ RX_PERIOD=${rx_correction_bytes}
 TX_PERIOD=${tx_correction_bytes}
 LAST_CHECK=${now_ts}
 PERIOD_START=0
+INTERFACE=${INTERFACE:-}
 EOF
     fi
 
@@ -1489,6 +1740,7 @@ EOF
     printf  '    ● 采样间隔    : %s秒\n' "${COLLECT_INTERVAL}"
     echo -e "    ● 自动更新    : ${AUTO_UPDATE}"
     echo -e "    ● 调试日志    : ${DEBUG_MODE}"
+    echo -e "    ● 统计网卡    : ${INTERFACE:-自动汇总}"
     [ -n "${RX_CORRECTION}" ] && echo -e "    ● 下行校正    : ${RX_CORRECTION}GB"
     [ -n "${TX_CORRECTION}" ] && echo -e "    ● 上行校正    : ${TX_CORRECTION}GB"
     if [ "${RESET_DAY}" = "0" ]; then

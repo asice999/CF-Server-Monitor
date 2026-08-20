@@ -1,930 +1,657 @@
-# [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor)
+<div align="center">
 
-一个基于 Cloudflare Workers + D1 + Durable Objects 的多服务器监控探针系统，支持实时监控、历史数据查看、延迟追踪、地图展示等功能。兼容主流 Linux 系统、Alpine Linux、OpenWrt、macOS（Intel / Apple Silicon）、Windows 系统。
+# CF-Server-Monitor
 
-**演示地址**：<https://demo.huilang.me/>
+基于 Cloudflare Workers、D1 和 Durable Objects 的轻量级多服务器监控面板。
 
-**当前Workers版本：V2.7.12 Beta; Agent版本：1.3.1**（见 [`version.json`](./version.json)）
+<p>
+  <a href="README.md">简体中文</a>
+  |
+  <a href="README-en.md">English</a>
+</p>
 
-> [!IMPORTANT]
-> V2.7.10 加入了 CSP 内容安全策略。默认只允许同源资源和必要的 Cloudflare/Google Fonts 资源；
-> 
-> 第三方背景图、外部 CSS/JS、字体、图片等资源会被浏览器拦截，需要在管理后台 → 外观 → CSP 设置中加入可信域名白名单后才能加载。
-> 
-> 这是基于安全考虑，用于降低 XSS、数据注入和未知第三方资源风险。
+[![Workers](https://img.shields.io/badge/Workers-2.8.4%20Beta5-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
+[![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#许可证)
 
-> [!NOTE]
-> **对比其他探针的优势**
->
-> - 免费托管在 Cloudflare，稳定性比自己服务器还高，超出免费额度也不扣费。目前支持 60+ 台监控，调整成 120 秒上报间隔后可以翻倍。
-> - 安全：无 WebSSH、无命令下发、单向上报，没有所谓的“主控”；Workers 项目只是一个纯收集数据和展示的平台。
-> - 客户端只需一个非常简单的 [install.sh](https://github.com/huilang-me/CF-Server-Monitor/blob/main/public/install.sh) 脚本，不依赖 Go 之类的语言，原生支持，非常轻量。
-> - 其他探针该有的功能基本都有，后续将继续完善。
+[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Go 探针文档](https://github.com/huilang-me/cfsm-agent) · [主题开发](theme-develop.md)
 
-<details>
-<summary>更新记录</summary>
+</div>
 
-- V2.7.12 Beta 新增Agent自动更新功能，默认关闭，谨慎开启。（本次更新需要手动升级agent安装脚本后才生效）
-- V2.7.11 优化客户端探针脚本，减少服务器流量消耗，添加GitHub自动同步功能，实现Workers自动升级。增加了Workers/Agent版本升级提示。增加OS图标显示（本次更新需要手动升级agent安装脚本）
-- V2.7.10 加入了 CSP 内容安全策略。重构前端 admin 模块，新增 iOS Scriptable 小组件，新增 tags、note 字段
-- V2.7.9 修改数据库结构，减少一半D1写入消耗，理论上支持60+服务器监控，在保证安全的基础上，增加服务器参数下发功能。
-- V2.7.8 修复月度任务导致数据表索引丢失的严重 Bug
-- V2.7.7 添加GitHub Page部署支持，添加飞书，Bark通知支持
-- V2.7.6 添加多站点支持，包括验证码登录等，添加 Windows PowerShell 无依赖安装脚本，一些安全优化
-- V2.7.5 DO WebSocket改成 DO WebSocket Hibernation基本剔除DO Duration消耗，新增批量推送入口，每5秒批量接收多个服务器更新，减少 DO 请求次数。
-- V2.7.4 添加允许跨域配置，为后续版本额外功能做铺垫，前端加上跨域配置，修改成HASH模式，修改country为region，数据库自动维护
-- V2.7.3.3 压缩定时任务4个为2个，避免超出免费额度
-- V2.7.3.2 合并通知告警，其他代码逻辑优化
-- V2.7.3.1 当request.cf返回`cf object not available`错误，导致国家/地区代码获取失败，使用request.headers获取作为备选
-- V2.7.3 新增服务器到期提醒功能，调整后台设置页面布局
-- V2.7.2 新增支持多分区磁盘统计功能以及其他优化，增加[图文教程](https://huilang.me/cf-server-monitor-setup/)
-- V2.7.1 新增国内四线路丢包率监控与历史图表，新增GPU字段与图表展示（GPU暂未测试），后台新增 Cloudflare D1/Workers 每日额度查询功能；
-- V2.7.0 将每日数据清理改为每月1号执行的表轮换任务, 删除旧表将不再扣除D1消耗,前端图表支持查看最长7天的历史数据,优化脚本一键升级功能
-- V2.6.10 修复了方式一部署方式，同步后丢失API\_SECRET的问题
-- V2.6.9 修复地图显示问题，重构OpenWrt安装脚本，新增OpenRC服务支持
-- V2.6.8 修复网卡统计误统计非目标网卡流量的问题,修复Alpine环境UDP连接数统计错误,本次更新需要重新安装脚本才能生效
-- v2.6.7 增加了月流量统计校正功能，以及首页流量统计展示
-- v2.6.6 增加上报间隔，Ping方式，流量重置日入库功能
-- V2.6.5 修复了部分系统启动时间获取错误的问题，TCP/UDP上报格式错误导致失败问题，新增详情页面实时网速展示
-- V2.6.4 增加了 **月流量统计** 功能，升级后请在后台手动点击 **升级数据库** 来更新数据库结构。不然会导致数据库结构错误，影响正常运行。同时需要在后台设置重置日期，并重新安装脚本。
-- V2.6.3 应大家需求，增加自定义Ping设置
-- V2.6.0 降低了 50% 的D1写入消耗，强烈建议升级，升级后请在后台手动点击 升级数据库 或者 重建数据库 。
-- V2.5.0 增加客户端上报数据后，在不占用D1消耗的情况下，前端WebSocket实时刷新数据
-- V2.4.0 版本主要优化了D1读写占用，使项目消耗大大降低，以及增加了防护避免被刷。
+## 项目简介
 
-</details>
+CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，数据写入 D1，并通过 Durable Objects + WebSocket 推送到前端，实现免费托管、低维护的实时监控。
 
-## ✨ 功能特点
+支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统。
 
-- 📊 **实时监控**：CPU、GPU、内存、磁盘、网络、进程数、连接数、负载均衡
-- 📈 **历史图表**：支持 7 天历史数据查看
-- 🌍 **全球地图**：可视化展示服务器分布
-- 🔔 **离线告警**：支持 Telegram、企业微信 / 飞书 / Bark 通知
-- 📱 **响应式**：支持桌面端和移动端
-- 🔄 **自动部署**：GitHub Actions 一键部署
-- 🗺️ **网络质量追踪**：国内电信/联通/移动/字节延迟与丢包率监测
-- 🔒 **服务器隐藏**：可设置特定服务器对非登录用户隐藏
-- ↕️ **拖拽排序**：后台拖拽调整服务器显示顺序
-- 🌐 **双语支持**：支持中文和英文界面自由切换
-- 🧩 **多站点支持**：可配置多个 API 站点聚合展示，详情页与后台按站点独立访问
-- 🧪 **本地测试**：支持本地模拟数据生成，方便开发和测试
-- 🔐 **Turnstile 验证**：集成 Cloudflare Turnstile 人机验证，增强 API 安全性
-- 🔑 **JWT 认证**：登录系统采用 JWT token 认证，支持自定义密钥
-- 🛡️ **CSP 安全策略**：默认限制第三方静态资源加载，可在后台按需添加可信白名单
-- 📉 **额度查询**：后台可查询 Cloudflare D1 当日读写行数与 Workers 请求量
-- ⚡ **实时推送**：基于 Durable Objects + WebSocket，探针上报后页面立即刷新，无轮询延迟
+高安全性：Agent 仅单向上报指标，不提供 WebSSH、远程命令下发或主控通道；支持非 root 运行，可降低监控组件被利用后的影响范围。
 
-## 🚀 快速开始
+## 目录
+
+- [对比优势](#对比优势)
+- [特性](#特性)
+- [系统架构](#系统架构)
+- [版本说明](#版本说明)
+- [快速部署](#快速部署)
+- [首次使用](#首次使用)
+- [Agent 参数与安全建议](#agent-参数与安全建议)
+- [配置说明](#配置说明)
+- [通知与告警](#通知与告警)
+- [安全建议](#安全建议)
+- [主题与外观](#主题与外观)
+- [升级与维护](#升级与维护)
+- [本地开发](#本地开发)
+- [项目结构](#项目结构)
+- [常见问题](#常见问题)
+- [界面预览](#界面预览)
+- [支持项目](#支持项目)
+
+## 对比优势
+
+相比传统主控式探针，CF-Server-Monitor 更适合低成本、低维护和安全优先的监控场景：
+
+- 免费托管：面板、API、数据库和实时推送都运行在 Cloudflare 上，按免费额度友好设计；默认 60 秒上报间隔可支持约 60 台服务器，改为 120 秒后理论上可翻倍。
+- 单向上报更安全：没有 WebSSH、没有远程命令下发、没有主控通道；Agent 只向 Worker 上报指标。
+- 功能覆盖完整：实时指标、历史图表、地图展示、离线通知、资源告警、到期提醒、主题商店、多语言和移动端适配都已内置。
+- 参数动态下发：后台可修改 Ping 节点、采集间隔、HTTP 上报间隔、WSS 上报间隔、统计网卡、流量重置日、上下行流量校正等参数，Agent 后续自动拉取并生效；Worker 地址、`API_SECRET` 和自动更新开关变更需要重新执行安装命令。
+- 支持非 root 安装：支持 `systemd --user` 的 Linux 可使用普通用户安装，探针文件写入 `~/.cf-probe/`。
+- 上报时间自动校准：Go Agent 会使用 Worker 响应中的 HTTP `Date` 头校正样本时间和 `boot_time`，降低服务器本地时间错误对历史图表的影响；不会修改系统时间。
+
+## 特性
+
+| 模块        | 能力                                                                               |
+| --------- | -------------------------------------------------------------------------------- |
+| 实时监控      | CPU、GPU、内存、交换分区、磁盘、磁盘 IO、网络、连接数、进程数、负载、运行时间                                      |
+| 历史数据      | 7 天历史图表、长时段采样、实时网速、月流量统计与校正                                                      |
+| 网络质量      | 电信、联通、移动、BGP/字节节点延迟与丢包率追踪                                                        |
+| 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
+| 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
+| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；默认 Go 版本，保留 Shell/PowerShell 版本 |
+| 实时推送      | Durable Objects + WebSocket，Agent 上报后前端即时刷新                                      |
+| 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警                                                            |
+| 多语言       | 前端内置中文和英文切换；文档提供中文与英文入口                                                          |
+| 多站点       | 支持 GitHub Pages 静态前台和多个 Worker API 聚合展示                                          |
+| 小组件       | 提供 iOS Scriptable 小组件脚本，适合移动端快速查看                                                |
+| 安全控制      | API Secret、管理员密码、JWT、Turnstile、CORS、CSP 白名单                                      |
+| 主题生态      | 内置主题、Mikus 模式、主题商店、第三方主题反代与预览                                                    |
+| 额度友好      | 按月表轮换、历史查询采样、缓存与限流设计，适配 Cloudflare 免费额度                                          |
+
+## 系统架构
+
+```mermaid
+flowchart LR
+  Agent["Server Agent<br/>Go / Shell / PowerShell"] -->|"POST /update"| Worker["Cloudflare Worker"]
+  Worker --> D1["Cloudflare D1<br/>servers / settings / history"]
+  Worker <--> DO["Durable Object<br/>WebSocket broadcast"]
+  Worker --> Assets["Vue Dashboard<br/>Admin Panel"]
+  Browser["Browser / Mobile / Widget"] <--> Worker
+```
+
+核心数据流：
+
+1. 在管理后台添加服务器，复制安装命令。
+2. 目标服务器安装 Agent，按上报间隔向 Worker 发送指标。
+3. Worker 校验 `API_SECRET`，写入 D1，并通过 Durable Object 广播实时数据。
+4. 前台大盘、详情页、管理后台和 iOS 小组件读取同一套 API。
+
+近期变化：
+
+- `2.8.4`：新增 Agent WSS 上报，提升实时数据推送及时性；新增账户Do用量展示，优化无前端订阅时的 Do 实时广播请求，降低空闲额度消耗。通知设置新增自定义 Webhook 渠道, 新增前端wss超时配置。
+- `2.8.3`：新增磁盘 IO 统计，默认 Agent 切换为 Go 版本，新增服务器延迟与丢包率实时窗口。
+- `2.8.2`：引入 Go Agent 支持。
+- `2.8.1`：优化长时间历史查询 D1 读行，增加资源负载通知和主题商店接口优化。
+- `2.8.0`：新增主题商店，支持一键切换第三方主题。
+- `2.7.x`：重构数据库写入、月表轮换、通知模块、安全策略、服务器计费字段、导入导出和多项后台能力。
+
+Go Agent 的完整更新记录见 [cfsm-agent releases](https://github.com/huilang-me/cfsm-agent/releases)。
+
+## 快速部署
 
 ### 前置要求
 
-- [Cloudflare 账户](https://dash.cloudflare.com/)
-- [GitHub 账户](https://github.com/)
+- Cloudflare 账户
+- GitHub 账户
+- 一个足够复杂的 `API_SECRET`，同时作为 Agent 上报密钥和初始后台密码
 
-<details>
-<summary>方式一：Cloudflare Workers 连接GitHub仓库（推荐使用，方便同步）图文教程 -> https://huilang.me/cf-server-monitor-setup/</summary>
+建议优先使用「Cloudflare Workers 连接 GitHub 仓库」或「GitHub Actions 自动部署」。一键部署适合快速体验，但后续同步更新不够方便。
 
-### 第一步：Fork 项目
+### 方式一：Cloudflare Workers 连接 GitHub 仓库
 
-点击右上角 **Fork** 按钮，将项目 Fork 到你的 GitHub 账户。
+这是推荐方式，适合希望通过 Cloudflare 控制台自动构建和重新部署的用户。
 
-### 第二步：新建 Cloudflare Workers
+1. Fork 本仓库到自己的 GitHub 账号。
+2. 进入 Cloudflare Dashboard，打开 Workers & Pages。
+3. 创建 Worker，并选择从 GitHub 仓库导入本项目。
+4. 构建命令填写 `npm run build:frontend`。
+5. 部署命令使用 `npx wrangler deploy`。
+6. 部署完成后，在 Worker 的 Variables and Secrets 中添加 `API_SECRET`。
 
-1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)
-2. 进入 **[Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)**
-3. 点击 **Create application**
-4. 选择 Continue with GitHub（第一次使用需要连接 GitHub 账户），选择本项目
-5. Project Name填写：`cf-server-monitor`
-6. Build command 填写：`npm run build:frontend`
-7. Deploy command 填写：`npx wrangler deploy --keep-vars`
-8. 点击 **Deploy**，成功会在底部显示`✨ Success! Build completed.`
+图文教程：<https://huilang.me/cf-server-monitor-setup/>
 
-### 第三步：配置环境变量
+### 方式二：GitHub Actions 自动部署
 
-1. 在当前Workers & Pages页面，点击 **Settings**
-2. 在Variables and secrets找到API\_SECRET，点右侧编辑，填写密码（建议使用随机数,不要包含特殊字符比如%），点Deploy保存部署，等待30秒左右部署完成
+适合希望把部署流程完全托管在 GitHub Actions 的用户。
 
-</details>
+1. Fork 本仓库。
+2. 在 Cloudflare 创建 D1 数据库，名称建议为 `server-monitor-db`。
+3. 复制 Cloudflare Account ID。
+4. 创建 Cloudflare API Token，至少需要 Workers 编辑和 D1 部署相关权限。
+5. 在 Fork 后的 GitHub 仓库中进入 Settings -> Secrets and variables -> Actions。
+6. 添加以下 Secrets。
 
-<details>
-<summary>方式二：GitHub Action 自动部署</summary>
+| Secret                 | 必填 | 说明                       |
+| ---------------------- | -- | ------------------------ |
+| `CF_API_TOKEN`         | 是  | Cloudflare API Token     |
+| `CF_ACCOUNT_ID`        | 是  | Cloudflare Account ID    |
+| `D1_DATABASE_ID`       | 是  | D1 数据库 ID                |
+| `API_SECRET`           | 是  | Agent 上报密钥和初始后台密码        |
+| `CORS_ALLOWED_ORIGINS` | 否  | 允许跨域访问 API 的来源，多个用英文逗号分隔 |
 
-### 第一步：Fork 项目
-
-点击右上角 **Fork** 按钮，将项目 Fork 到你的 GitHub 账户。
-
-### 第二步：创建 D1 数据库
-
-1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)
-2. 进入 **[Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)**  → **[D1 SQL Database](https://dash.cloudflare.com/?to=/:account/workers/d1)**
-3. 点击 **Create database**
-4. 数据库名称填写：`server-monitor-db`
-5. 点击 **Create**
-6. 记录下生成的 **Database ID**，稍后会用到
-
-### 第三步：获取 Cloudflare 配置
-
-#### 获取 Account ID
-
-**方式一：从右侧面板获取**
-
-1. 打开 [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/workers-and-pages)
-2. 在右侧面板找到 **Account ID**
-3. 复制保存
-
-**方式二：从 URL 中获取**
-
-- 登录后访问任意 Cloudflare 页面，例如 [Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)
-- URL 中 `dash.cloudflare.com/` 之后的那串字符就是 Account ID
-
-#### 获取 API Token
-
-1. 打开 [API Tokens 页面](https://dash.cloudflare.com/profile/api-tokens)
-2. 点击 **Create Token/创建令牌**
-3. 选择（**Edit Cloudflare Workers/编辑 Cloudflare Workers**）模板
-4. 在 **Account Resources/帐户资源** 选择你的账户
-5. 点击 **Continue to summary/继续以显示摘要**→ **Create Token/创建令牌**
-6. 复制生成的 Token（只显示一次！）
-
-### 第四步：配置 GitHub Secrets
-
-1. 打开你 Fork 的 GitHub 仓库
-2. 进入 **Settings** → **Secrets and variables** → **Actions**
-3. 点击 **New repository secret**，依次添加以下 5 个密钥：
-
-| Secret 名称        | 值                  | 说明                                     |
-| ---------------- | ------------------ | -------------------------------------- |
-| `CF_API_TOKEN`   | 第三步获取的 Token       | Cloudflare API 令牌                      |
-| `CF_ACCOUNT_ID`  | 第三步获取的 ID          | Cloudflare 账户 ID                       |
-| `API_USER_NAME`  | 自定义用户名（非必填）        | 管理后台用户名 新版已移除，默认用户名admin               |
-| `API_SECRET`     | API 认证密钥（必填）       | 探针认证密钥 & 默认管理后台密码 建议使用随机密码,不要包含特殊字符比如% |
-| `D1_DATABASE_ID` | 第二步获取的 Database ID | D1 数据库 ID                              |
-| `API_BASE`       | API 域名（非必填）        | 多站点模式下的 API 地址，多个用逗号分隔                    |
-| `CSP_STATIC`     | 静态文件域名（非必填）       | 额外的 CSP 静态资源白名单，多个用逗号分隔；用于第三方背景图、CSS、JS、字体、图片等 |
-| `CSP_API`        | API 域名（非必填）        | 额外的 CSP API 白名单，多个用逗号分隔；用于允许前端连接第三方 API/WebSocket |
-
-### 第五步：部署
-
-#### 方式一：自动部署
-
-推送代码到 `main` 分支，GitHub Actions 会自动部署。在仓库的 **Actions** 标签页可查看部署进度。
-
-#### 方式二：手动部署
-
-也可以通过 GitHub Actions 手动触发部署：
-
-1. 进入你的 GitHub 仓库页面
-2. 点击顶部的 **Actions** 标签
-3. 在左侧工作流列表中选择 **Deploy to Cloudflare Workers**
-4. 点击右侧的 **Run workflow** 按钮
-5. 选择分支（默认选择 `main`）
-6. 点击 **Run workflow** 开始部署
-
-部署进度可在 **Actions** 标签页中查看。
-
-</details>
-
-<details>
-<summary>方式三：一键部署（比较简单，但不推荐，不方便更新）</summary>
-
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/huilang-me/CF-Server-Monitor)
-
-新用户点击一键部署
-
-修改`API_SECRET`，建议使用随机密码,不要包含特殊字符比如%，登录密码在登录后修改，建议和API\_SECRET不同。
-
-在build command中填入 `npm run build:frontend`，其他保持默认
-
-点击部署即可
-
-</details>
-
-## 📊 使用说明
-
-<details>
-<summary>访问管理后台</summary>
-
-部署成功后，访问管理后台：
-
-```
-https://你的项目名.你的子域.workers.dev/#/admin
-```
-
-- 用户名：默认admin，如果设置了环境变量 `API_USER_NAME`，则使用该值
-- 密码：你设置的 `API_SECRET`
-
-**登录后务必修改用户名和密码，以确保安全。** 强烈建议登录密码和探针认证密钥不同。
-
-> **提示**：项目名和子域可以在 Cloudflare Workers & Pages 页面找到。建议绑定域名，避免国内无法访问
-
-</details>
-
-<details>
-<summary>添加服务器监控</summary>
-
-### 在管理后台添加服务器
-
-1. 进入管理后台 `/#/admin`
-2. 在"服务器名称"输入框填写名称
-3. 点击 **+ 添加服务器**
-4. 点击新服务器旁的 **📋** 按钮复制安装命令
-
-### 参数说明
-
-| 参数                  | 说明                           | 默认值    |
-| ------------------- | ---------------------------- | ------ |
-| `-id`               | 服务器唯一标识符（必填）                 | -      |
-| `-secret`           | API 认证密钥（必填）                 | -      |
-| `-url`              | Worker 上报地址（必填）              | -      |
-| `-collect_interval` | 数据采集间隔（秒），`0` 表示不额外采集并使用单条上报 | `0`    |
-| `-interval`         | 数据上报间隔（秒）                    | `60`   |
-| `-ct`               | 自定义CT测试节点，支持 `host[:port]` | 默认节点   |
-| `-cu`               | 自定义CU测试节点，支持 `host[:port]` | 默认节点   |
-| `-cm`               | 自定义CM测试节点，支持 `host[:port]` | 默认节点   |
-| `-bd`               | 自定义BD测试节点，支持 `host[:port]` | 默认节点   |
-| `-reset_day`        | 流量重置日（1-31）                  | `1`    |
-| `-rx_correction`    | 下行流量校正（GB，直接设置当月下行数据）        | -      |
-| `-tx_correction`    | 上行流量校正（GB，直接设置当月上行数据）        | -      |
-
-> **注意**：`-collect_interval` 控制本机额外采集频率，`-interval` 控制向 Worker 上报频率。默认 `0` 为兼容模式：不额外采集，只按上报间隔发送单条数据；设置为 `1` 时才会 1 秒采集、按上报间隔批量发送。上报间隔越短，API 调用和数据库写入越多。
-
-</details>
-
-<details>
-<summary>升级 Cloudflare Workers</summary>
-
-根据您使用的安装方式，选择对应的升级方法：
-
-### 方式一/方式二：Fork 后通过 GitHub 同步（推荐）
-
-无论你使用 Cloudflare Workers 连接 GitHub 仓库，还是使用 GitHub Action 自动部署，升级方式相同：同步上游仓库即可。
-
-#### 自动同步（推荐）
-
-建议启用自动同步功能，系统会每天自动同步上游仓库的最新代码：
-
-1. 进入你 Fork 的 GitHub 仓库页面
-2. 点击 **Actions** 标签
-3. 首次使用时，点击 **"I understand my workflows, go ahead and enable them"** 启用 Actions
-4. 找到 **Upstream Sync** 工作流，点击进入
-5. 点击 **Run workflow** 手动触发一次，确认同步正常工作
-
-启用后，系统每天 UTC 0:00（北京时间 8:00）会自动检测上游仓库是否有新提交，有则自动合并到你的 `main` 分支。
-
-> **注意**：如果同步失败，提示"由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新"，请前往仓库页面点击 **Sync Fork** → **Update branch** 手动执行一次同步，然后再次启用 Actions。
-
-#### 手动同步
-
-如果需要立即同步，可以手动操作：
-
-1. 进入你 Fork 的 GitHub 仓库页面
-2. 点击 **Sync fork** → **Update branch** 同步上游更新
-
-或者在 **Actions** 标签页中点击 **Upstream Sync** → **Run workflow** 手动触发。
-
-**部署触发方式**：
-
-- **Cloudflare Workers 连接 GitHub 仓库**：同步后 Cloudflare 会自动检测到代码变更并重新部署
-- **GitHub Action 自动部署**：同步后 GitHub Actions 会自动触发部署，可在 **Actions** 标签页查看进度
+推送到 `main` 分支会自动部署，也可以在 Actions 页面手动运行 `Deploy to Cloudflare Workers` 工作流。
 
 ### 方式三：一键部署
 
-一键部署方式升级较为麻烦，建议重新部署：
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/huilang-me/CF-Server-Monitor)
 
-1. 访问 [一键部署页面](https://deploy.workers.cloudflare.com/?url=https://github.com/huilang-me/CF-Server-Monitor)
-2. 选择已存在的项目进行更新
-3. 在 build command 中填入 `npm run build:frontend`
-4. 点击部署
+部署时请确认：
 
-> **注意**：一键部署方式不方便同步更新，建议迁移到方式一。
+- Build command 使用 `npm run build:frontend`
+- `API_SECRET` 改为随机强密码，不要继续使用默认值
+- 登录后台后尽快修改管理员用户名和密码
 
-</details>
+一键部署不方便长期同步上游更新，正式使用更建议迁移到方式一或方式二。
 
-<details>
-<summary>升级探针</summary>
+## 首次使用
 
-当有新版本部署成功后，可以通过以下命令升级探针，升级过程会自动保留原有配置：
+### 登录后台
 
-```bash
-# Linux
-curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s install
-# Alpine
-curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s install
-# OpenWrt
-curl -sL https://你的项目.你的子域.workers.dev/install-openwrt.sh | sh -s install
-# macOS
-curl -sL https://你的项目.你的子域.workers.dev/install-mac.sh | sudo bash -s install
-# Windows
-irm https://你的项目.你的子域.workers.dev/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1; powershell -ExecutionPolicy Bypass -File .\cf-server-monitor.ps1 install
+部署成功后访问：
+
+```text
+https://你的 Worker 域名/admin#/admin
 ```
 
-> **V2.7.9 及以上说明**：从 V2.7.8 或更早版本升级后，请重新安装一次探针以启用参数下发能力。之后在后台修改服务器参数会自动下发到探针，无需每次重新安装；受上报间隔和缓存影响，最长约 240 秒才能看到效果。
+默认凭据：
 
-为了安全，没有提供自动升级功能，如有需要自行将升级脚本加入服务器定时任务。
+| 项目  | 默认值          |
+| --- | ------------ |
+| 用户名 | `admin`      |
+| 密码  | `API_SECRET` |
 
-比如 crontab -e 中添加以下内容，每天凌晨 0 点执行升级：
+登录后建议立即修改后台用户名和密码。后台登录密码可以和 `API_SECRET` 分离；服务器 Agent 上报仍使用 Cloudflare 环境变量中的 `API_SECRET`。
+
+### 添加服务器
+
+1. 进入 `/admin#/admin`。
+2. 在服务器管理中填写服务器名称。
+3. 点击添加服务器。
+4. 点击复制按钮，选择目标系统和 Agent 版本。
+5. 在目标服务器上执行复制出的安装命令。
+
+建议优先使用后台生成的命令，因为它会自动带上服务器 ID、Worker URL、Secret、上报间隔、网络质量节点和网卡等参数。
+
+## Agent 参数与安全建议
+
+V2.8.3 起默认使用独立项目 [cfsm-agent](https://github.com/huilang-me/cfsm-agent)，安装后服务名为 `cf-probe`。新增服务器后建议直接从管理后台复制安装命令，后台会按目标系统、服务器 ID、Worker 地址和当前参数生成完整命令。
+
+完整安装路径、日志查看、状态检查和升级行为见 [https://github.com/huilang-me/cfsm-agent](https://github.com/huilang-me/cfsm-agent)。
+
+### 常用参数
+
+| 参数                            | 说明                           | 默认值  |
+| ----------------------------- | ---------------------------- | ---- |
+| `-id`                         | 服务器唯一 ID                     | 必填   |
+| `-secret`                     | Agent 上报密钥，需要等于 `API_SECRET` | 必填   |
+| `-url`                        | Worker 上报地址                  | 必填   |
+| `-collect_interval`           | 本机采集间隔；`0` 表示不额外采样           | `0`  |
+| `-interval`                   | 上报间隔，单位秒                     | `60` |
+| `-ct` / `-cu` / `-cm` / `-bd` | 自定义网络质量测试节点，支持 `host[:port]` | 内置节点 |
+| `-reset_day`                  | 月流量重置日                       | `1`  |
+| `-rx_correction`              | 下行月流量校正，单位 GB                | 空    |
+| `-tx_correction`              | 上行月流量校正，单位 GB                | 空    |
+
+`-collect_interval` 控制本机额外采集频率，`-interval` 控制上报频率。上报越频繁，Workers 请求和 D1 写入越多。
+
+### 非 root 安装（推荐）
+
+支持 `systemd --user` 的 Linux 环境建议优先使用非 root 安装，可避免 Agent 长期以 root 身份运行，大幅提高安全性。非 root 安装会使用当前用户，并将文件写入 `~/.cf-probe/`，自启动依赖 `systemd --user`。如果希望用户退出登录后服务仍可运行，请先由 root 执行：
 
 ```bash
-# Linux
-0 0 * * * curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s install
+loginctl enable-linger 用户名
 ```
 
-</details>
+如果从旧 root 安装切换到非 root 安装，建议先用 root 卸载旧版，再切换到目标用户执行后台复制的安装命令。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，按后台生成的对应系统命令安装即可。
 
-<details>
-<summary>卸载探针</summary>
+## 配置说明
+
+### Worker 环境变量
+
+| 变量                     | 必填 | 说明                       |
+| ---------------------- | -- | ------------------------ |
+| `API_SECRET`           | 是  | Agent 上报密钥；也是首次登录后台的默认密码 |
+| `CORS_ALLOWED_ORIGINS` | 否  | 允许跨域访问 API 的来源，多个用英文逗号分隔 |
+
+### GitHub Pages 静态前台
+
+项目支持把前台构建到 GitHub Pages，并通过远程 Worker API 聚合数据。相关工作流为 `.github/workflows/deploy-github-page.yml`。
+
+| Secret             | 说明                         |
+| ------------------ | -------------------------- |
+| `API_BASE`         | Worker API 地址，多个用英文逗号分隔    |
+| `TITLE`            | 静态前台标题                     |
+| `BACKGROUND_IMAGE` | 背景图地址                      |
+| `CSP_STATIC`       | 额外静态资源 CSP 白名单             |
+| `CSP_API`          | 额外 API / WebSocket CSP 白名单 |
+
+构建命令：
 
 ```bash
-# Linux
-curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s uninstall
-# Alpine
-curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s uninstall
-# OpenWrt
-curl -sL https://你的项目.你的子域.workers.dev/install-openwrt.sh | sh -s uninstall
-# macOS
-curl -sL https://你的项目.你的子域.workers.dev/install-mac.sh | sudo bash -s uninstall
-# Windows
-irm https://你的项目.你的子域.workers.dev/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1; powershell -ExecutionPolicy Bypass -File .\cf-server-monitor.ps1 uninstall
+npm run build:github-page
 ```
-</details>
 
-<details>
-<summary>安全增强</summary>
+### 后台可配置项
 
-### Turnstile 配置（可选）
-
-如需启用 Turnstile 人机验证，可用于基本拦截恶意攻击，避免额度超出，需在管理后台配置：
-
-1. 登录 [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile)
-2. 创建站点，获取 **Site Key** 和 **Secret Key**
-3. 在管理后台 → 全局设置中启用 Turnstile 并填入密钥
-
-### JWT 配置（可选）
-
-如需自定义 JWT 密钥：
-
-1. 生成一个至少 32 位的随机字符串作为 JWT Secret
-2. 在管理后台 → 全局设置 → 安全设置中填入 JWT Secret
-3. 保存后系统将使用自定义密钥进行 token 签名
-
-### CORS 跨域配置（可选）
-
-如需允许特定域名跨域访问 Workers API，可配置允许的来源：
-
-1. 在 Workers & Pages 页面的 **Settings** → **Variables and secrets** 中添加 `CORS_ALLOWED_ORIGINS`
-2. 值设置为允许跨域的域名，多个域名用逗号分隔，例如：`https://example.com,https://www.example.com`
-3. 不设置此变量或留空时，默认仅允许同源请求
-
-### CSP 内容安全策略配置（可选）
-
-Content Security Policy (CSP) 是一种安全层，用于检测和缓解某些类型的攻击，包括跨站脚本 (XSS) 和数据注入攻击。
-
-项目默认启用 CSP，并采用偏保守的默认策略：除了同源资源和内置必要域名外，第三方静态资源默认会被浏览器拦截。这包括：
-
-- 第三方背景图，例如 `https://cdn.example.com/bg.webp`
-- 外部 CSS，例如 `<link rel="stylesheet" href="https://cdn.example.com/theme.css">`
-- CSS 里的 `@import`，例如 `@import url('https://cdn.example.com/theme.css')`
-- 外部 JS，例如 `<script src="https://cdn.example.com/demo.js"></script>`
-- 外部字体、图片、图标等静态文件
-
-如果浏览器控制台出现 `Content Security Policy`、`Refused to load`、`Refused to execute` 等提示，通常不是资源地址失效，而是该第三方域名没有加入 CSP 白名单。
-
-**默认白名单**（已内置）：
-
-- `https://challenges.cloudflare.com` - Cloudflare Turnstile
-- `https://static.cloudflareinsights.com` - Cloudflare Analytics
-- `https://fonts.googleapis.com` - Google Fonts CSS
-- `https://fonts.gstatic.com` - Google Fonts 文件
-
-**后台配置**：
-
-如果需要添加第三方背景图、CSS、JS、字体、图片等资源，可在管理后台 → 外观 设置中配置：
-
-| 字段 | 说明 | 示例 |
-|------|------|------|
-| CSP 静态文件域名 | 允许加载的第三方静态资源域名 | `https://cdn.jsdelivr.net,https://cdnjs.cloudflare.com` |
-| CSP API 域名 | 允许连接的 API 域名 | `https://api.example.com` |
-
-填写规则：
-
-- 只填写域名源（origin），不要填写完整文件路径。例如填写 `https://cdn.jsdelivr.net`，不要填写 `https://cdn.jsdelivr.net/gh/user/repo/style.css`
-- 多个域名用英文逗号分隔
-- 仅建议填写 `https://` 域名
-- 使用同源资源或本地静态文件（例如 `./assets/bg.webp`）不需要额外添加白名单
-
-> **安全提示**：添加第三方 CSS/JS 时，请确保来源安全可靠。CSP 默认拦截第三方资源是为了避免恶意脚本注入、页面被篡改、数据泄露和未知追踪代码。建议优先使用同源资源，或将资源托管在自己可信的仓库/CDN 中；不要把不信任的公共 CDN 域名随意加入白名单。
-
-**GitHub Pages 环境变量配置**：
-
-| 环境变量 | 说明 | 示例 |
-|---------|------|------|
-| `CSP_STATIC` | 额外的静态文件域名，用于第三方背景图、CSS、JS、字体、图片等 | `https://cdn.jsdelivr.net` |
-| `CSP_API` | 额外的 API 域名 | `https://api.example.com` |
-
-> **注意**：`API_BASE` 环境变量会自动添加到 CSP API 白名单中。
-
-### Cloudflare 额度查询（可选）
-
-如需在后台查询 D1 当日读写额度和 Workers 请求量：
-
-1. 在 [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/workers-and-pages)右下角复制当前账户的 **Account ID**
-2. 在[API Tokens 页面](https://dash.cloudflare.com/profile/api-tokens)创建具备 **Account Analytics Read** 权限的 Cloudflare API Token
-3. 在管理后台 → 全局设置 → Cloudflare 设置中填入 Account ID 和 API Token
-4. 保存后点击 **查询 D1 额度** 查看 UTC 当日用量与下次重置时间
-
-</details>
-
-<details>
-<summary>通知设置</summary>
-
-## 🔔 通知设置
-
-在管理后台 → 全局设置 → 通知 中配置。支持以下通知方式，通过 Bot Token 字段自动识别平台类型：
-
-### Telegram
-
-1. 创建 Telegram Bot（通过 [@BotFather](https://t.me/BotFather)）
-2. 获取 Bot Token，填入 **Bot Token** 字段
-3. （通过 [@idbot](https://t.me/idbot)）获取 ID，填入 **Chat ID** 字段
-
-### 飞书
-
-1. 创建飞书群机器人，获取 Webhook URL
-2. 将 Webhook URL 填入 **Bot Token** 字段
-3. **Chat ID** 留空
-
-### 企业微信
-
-1. [创建企业微信群机器人](https://open.work.weixin.qq.com/help2/pc/14931) 并配置，获取 Webhook URL
-2. 将 Webhook URL 填入 **Bot Token** 字段
-3. **Chat ID** 留空
-
-### Bark
-
-1. 获取 Bark 推送链接，比如 `https://api.day.app/xxxxxxx/自定义内容`，删掉中文，保留 `https://api.day.app/xxxxxxx/`
-2. 将链接填入 **Bot Token** 字段
-3. **Chat ID** 留空
-4. 如果是自建 Bark 服务，格式为 `bark:https://example.com/xxxxxxx/`
-
-### Server 酱
-
-1. 注册 [Server 酱](https://sct.ftqq.com/) 获取 SendKey
-2. 将 SendKey 填入 **Bot Token** 字段，格式为 `https://sctapi.ftqq.com/你的SendKey.send`
-3. **Chat ID** 留空
-
-### WxPusher
-
-1. 注册 [WxPusher](https://wxpusher.zjiecode.com/) 获取 SPT Token
-2. 将 SPT Token 填入 **Bot Token** 字段，格式为 `https://wxpusher.zjiecode.com/api/send/message/[SPT_你的Token]/Hello%20WxPusher`
-3. **Chat ID** 留空
-
-### Gotify
-
-1. 部署或使用已有的 [Gotify](https://gotify.net/) 服务
-2. 在 Gotify 中创建 Application，获取 Token
-3. 将推送 URL 填入 **Bot Token** 字段，格式为 `https://你的Gotify地址/message?token=你的Token`
-4. **Chat ID** 留空
-
-### 告警类型
-
-| 类型   | 说明                       |
-| ---- | ------------------------ |
-| 离线告警 | 节点离线 5 分钟后发送告警，恢复后发送恢复通知 |
-| 到期提醒 | 服务器到期前 7 天内每天发送提醒        |
-
-### 测试通知
-
-配置完成后，可点击 **发送测试通知** 按钮验证配置是否正确。测试成功后记得点击 **保存**。
-
-</details>
-
-<details>
-<summary>其他设置</summary>
-
-### 前台大盘
-
-访问 `https://你的项目.你的子域.workers.dev/` 查看：
-
-- **卡片视图**：服务器状态概览（含实时网速和本月流量）
-- **表格视图**：详细数据列表
-- **地图视图**：全球服务器分布
-- **过滤器**：按国家筛选服务器
-
-### 服务器详情
-
-点击任意服务器卡片进入详情页：
-
-- 实时 CPU/GPU/内存/磁盘/网络/负载
-- 7 天历史趋势图
-- 鼠标悬停查看具体时间点的数值
-- 国内四线路延迟与丢包率追踪
-
-> **注意**：查看 1 小时以上的历史数据需要登录管理员账户。
+| 分类            | 主要内容                                  |
+| ------------- | ------------------------------------- |
+| 站点设置          | 标题、背景、favicon、默认展示模式、公开访问策略           |
+| 服务器参数         | HTTP/WSS 上报间隔、采集间隔、Ping 节点、网卡、月流量、价格、到期时间、自动续费 |
+| 安全设置          | 管理员账号密码、JWT Secret、Turnstile          |
+| 通知设置          | 离线告警、到期提醒、资源负载告警、测试通知                 |
+| 外观设置          | 自定义 CSS、`<head>`、CSP 白名单、Mikus 模式     |
+| 数据库管理         | 升级数据库、清空历史数据                          |
+| Cloudflare 用量 | 查询 D1 行读写和 Workers 请求量                |
 
 ### iOS Scriptable 小组件
 
-项目提供了 iOS Scriptable 小组件脚本：[scripts/ios-scriptable-widget.js](scripts/ios-scriptable-widget.js)。
+项目提供 [scripts/ios-scriptable-widget.js](scripts/ios-scriptable-widget.js)，可在 iPhone 桌面显示单台服务器状态。
 
 使用方式：
 
-1. 在 iPhone 安装 [Scriptable](https://scriptable.app/)。
-2. 将 [scripts/ios-scriptable-widget.js](https://github.com/huilang-me/CF-Server-Monitor/raw/refs/heads/main/scripts/ios-scriptable-widget.js) 内容复制到 Scriptable 新脚本中。
-3. 修改脚本顶部的 `CONFIG.baseURL` 为你的站点地址，例如 `https://status.example.com`。
-4. 添加 Scriptable 小组件，选择该脚本。
-5. 在小组件的 **Parameter** 中填写服务器 ID，例如 `955bd53e-531f-4dc8-8705-dc204000fa98`，也可以写成 `id:955bd53e-531f-4dc8-8705-dc204000fa98`。
+1. 在 iPhone 安装 Scriptable。
+2. 新建脚本，并放入 `scripts/ios-scriptable-widget.js` 内容。
+3. 修改脚本顶部的 `CONFIG.baseURL` 为你的站点地址。
+4. 添加 Scriptable 小组件并选择该脚本。
+5. 在小组件 Parameter 中填写服务器 ID，也可以写成 `id:SERVER_ID`。
 
-说明：
+小组件会显示在线状态、CPU、内存、磁盘、月流量、实时上下行速率和更新时间。iOS 会按系统策略决定实际刷新频率。
 
-- 如需在桌面上下滑动切换服务器，需要添加多个同尺寸 Scriptable 小组件，每个小组件填写不同的服务器 ID，然后在 iOS 桌面将它们叠成小组件堆叠。
-- 小组件会显示服务器在线状态、CPU/RAM/磁盘/流量、实时上下行速率和更新时间。
-- 脚本设置了 60 秒后刷新，但 iOS 会根据系统策略决定实际刷新时间。
+## 通知与告警
 
-### 主题切换与自定义
+在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”和“自定义 Webhook”两种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
 
-管理后台支持以下自定义功能：
+### 内置渠道
 
-| 功能 | 说明 | 位置 |
-|------|------|------|
-| 自定义 CSS 主题 | 修改页面样式 | 后台 → 外观 → 自定义脚本 |
-| 自定义 `<head>` | 添加外部 CSS/JS、Meta 标签等 | 后台 → 外观 → 自定义 `<head>` |
-| 背景图片 | 自定义页面背景 | 后台 → 外观 → 背景图片 |
-| CSP 白名单 | 允许加载的第三方资源域名 | 后台 → 外观 → CSP 设置 |
+内置渠道通过 Bot Token 内容自动识别平台。
 
-**自定义 `<head>` 使用示例**：
+| 平台          | Bot Token 填写方式                                                   | Chat ID     |
+| ----------- | ---------------------------------------------------------------- | ----------- |
+| Telegram    | BotFather 创建的 Bot Token                                          | 用户、群组或频道 ID |
+| 企业微信        | 群机器人 Webhook URL                                                 | 留空          |
+| 飞书          | 群机器人 Webhook URL                                                 | 留空          |
+| 钉钉          | 自定义机器人 Webhook URL                                               | 留空          |
+| OneBot / QQ | `onebot:http://host/send_private_msg?...` 或 `send_group_msg`     | 用户 ID 或群 ID |
+| Bark        | `https://api.day.app/xxxx/` 或 `bark:https://example.com/xxxx/`   | 留空          |
+| Server 酱    | `https://sctapi.ftqq.com/<SendKey>.send` 或 `server:https://example.com/<SendKey>.send` | 留空          |
+| WxPusher    | `https://wxpusher.zjiecode.com/api/send/message/[SPT_xxx]/Hello` | 留空          |
+| Gotify      | `https://gotify.example.com/message?token=xxx`                   | 留空          |
 
-```html
-<!-- 引入外部字体 -->
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+### 自定义 Webhook
 
-<!-- 通过 CSS @import 引入第三方样式 -->
-<style>
-@import url('https://cdn.jsdelivr.net/gh/user/repo/theme.css');
-</style>
+自定义 Webhook 支持 `GET` 和 `POST`：
 
-<!-- 自定义 Meta 标签 -->
-<meta name="description" content="My Server Monitor">
+- `POST`：可选择 `JSON`、`x-www-form-urlencoded` 或 `Text`。默认 JSON 请求体为 `title` 和 `content` 两个参数。
+- `GET`：使用同一个参数配置追加到 URL query；参数可写 JSON 对象，也可写 `title={{emoji}} {{event}}&content={{notification}}` 这种 QueryString。
+- 请求头支持 JSON 对象或 `Header: value` 多行文本。
+- 发送测试通知会按当前通知模板渲染后发送，适合保存前验证平台格式。
 
-<!-- 内联样式 -->
-<style>body { font-family: 'Inter', sans-serif; }</style>
+默认 Webhook 参数：
+
+```json
+{
+  "title": "{{emoji}} {{event}}",
+  "content": "{{notification}}"
+}
 ```
 
-**第三方资源导入说明**：
+默认通知模板：
 
-- 外部 CSS、CSS `@import`、外部 JS、第三方背景图、字体和图片都会受 CSP 限制
-- 如果资源来自第三方域名，需要先在后台 → 外观 → CSP 设置 → CSP 静态文件域名中加入对应域名源
-- 白名单填写域名源即可，例如资源地址是 `https://cdn.jsdelivr.net/gh/user/repo/theme.css`，只填写 `https://cdn.jsdelivr.net`
-- 背景图 URL 如果使用第三方 CDN，也需要把 CDN 域名加入 CSP 静态文件域名
-- API 请求或 WebSocket 连接使用第三方域名时，加入 CSP API 域名，而不是 CSP 静态文件域名
+```text
+{{emoji}}【CF Server Monitor】{{event}}
 
-> **安全警告**：
-> - 添加第三方 CSS/JS 时，请确保来源安全可靠，使用前建议将js源码发给AI完整分析安全后，确认无问题后使用
-> - 建议将资源托管在自己的 GitHub 仓库中，通过 CDN 调用
-> - 使用不当可能带来 XSS 攻击、数据泄露等严重安全风险
-> - 外部资源需要添加到 CSP 白名单中才能正常加载，这是为了安全而默认拦截，不是程序错误
+{{message}}
 
-### 主题开发
-
-如需开发自定义主题，请参考 [主题开发文档](theme-develop.md)。
-
-### 拖拽排序
-
-在管理后台的服务器列表中，可以通过拖拽调整服务器的显示顺序
-
-### 服务器隐藏
-
-可以将特定服务器设置为对非登录用户隐藏：
-
-1. 进入管理后台 `/#/admin`
-2. 点击服务器行右侧的 **✏️ 编辑** 按钮
-3. 勾选 **公开隐藏** 选项
-4. 点击 **保存**
-
-### 数据库管理
-
-管理后台提供数据库维护功能，可在 "Database Management" 标签页中找到：
-
-1. **升级数据库**：将数据库结构升级到最新版本，适用于旧版本用户升级
-   - 点击「Upgrade Database」按钮
-   - 确认升级操作
-   - 系统会自动执行数据库升级脚本
-2. **清空历史数据**：清空所有历史数据（⚠️ 危险操作）
-   - 点击「清空历史数据」按钮
-   - 确认操作（此操作将删除所有历史数据）
-   - 系统会清空并重新初始化数据库
-
-> **注意**：
->
-> - 清空历史数据是不可逆操作，请确保已备份重要数据
-> - 升级数据库不会删除现有数据，仅会更新表结构
-> - 从旧版本升级到包含 GPU/丢包率监控的新版本后，需要先执行升级数据库，再重新安装或升级探针以采集新字段
-
-</details>
-
-<details>
-<summary>定时任务</summary>
-
-系统包含以下定时任务（UTC 时区）：
-
-| 任务   | 触发时间          | 说明                                              |
-| ---- | ------------- | ----------------------------------------------- |
-| 离线检测 | `*/1 * * * *` | 每分钟检测离线节点并发送告警                                  |
-| 合并任务 | `0 * * * *`   | 每小时执行，根据日期判断执行：每月1号数据轮换、每月8号清理旧表、每天12:00服务器到期检测 |
-
-</details>
-
-## 📁 项目结构
-
-<details>
-<summary>项目结构</summary>
-
-```
-CF-Server-Monitor/
-├── public/
-│   ├── cf-server-monitor.ps1   # Windows 探针脚本（PowerShell 版，零依赖）
-│   ├── install.sh              # 一键安装脚本 - systemd 系统 (Ubuntu/Debian/CentOS)
-│   ├── install-alpine.sh       # 一键安装脚本 - OpenRC 系统 (Alpine Linux)
-│   ├── install-openwrt.sh      # 一键安装脚本 - procd 系统 (OpenWrt/LEDE)
-│   ├── install-mac.sh          # 一键安装脚本 - macOS (Intel / Apple Silicon)
-│   ├── favicon.ico             # 站点图标
-│   └── logo.svg                # Logo
-├── src/
-│   ├── index.js                # 后端主入口 - 路由分发 + Durable Object 导出
-│   ├── database/
-│   │   ├── schema.js             # 数据库初始化、表结构定义
-│   │   ├── indexOptimization.js  # 数据库索引优化
-│   │   └── updateDatabase.js     # 数据库升级处理
-│   ├── durable/
-│   │   └── MetricsBroadcaster.js # Durable Object：WebSocket 实时推送广播中心
-│   ├── middleware/
-│   │   └── auth.js             # 认证中间件
-│   ├── handlers/
-│   │   ├── admin.js            # 后台管理 API
-│   │   ├── dashboard.js        # 前台大盘 API
-│   │   ├── frontend.js         # 前端资源服务
-│   │   └── update.js           # 数据上报处理 + 广播到 DO
-│   ├── services/
-│   │   └── notification.js     # 通知服务
-│   ├── utils/
-│   │   ├── agentConfig.js      # 探针配置下发
-│   │   ├── cache.js            # 缓存工具
-│   │   ├── common.js           # 通用工具函数
-│   │   ├── cors.js             # CORS 处理
-│   │   ├── errors.js           # 错误类型与响应封装
-│   │   ├── metrics.js          # 指标处理工具
-│   │   └── settings.js         # 设置管理
-│   └── frontend/               # Vue 3 前端应用
-│       ├── App.vue             # 根组件
-│       ├── main.js             # 前端入口
-│       ├── components/         # Vue 组件
-│       │   ├── Footer.vue
-│       │   ├── ServerCard.vue
-│       │   └── TerminalHeader.vue
-│       ├── composables/        # 通用组合式函数
-│       │   ├── usePasswordVisibility.js
-│       │   └── useTheme.js
-│       ├── router/
-│       │   └── index.js        # Vue Router 配置
-│       ├── styles/             # 样式文件
-│       │   ├── light.css
-│       │   └── main.css
-│       ├── utils/
-│       │   ├── api.js          # API 请求封装 + WebSocket 客户端
-│       │   ├── config.js       # 前端运行时配置
-│       │   ├── constants.js    # 前端常量
-│       │   ├── http.js         # HTTP 请求封装
-│       │   ├── i18n.js         # 国际化配置
-│       │   ├── time.js         # 时间格式化工具
-│       │   └── turnstile.js    # Turnstile 共享工具
-│       └── views/              # 页面视图
-│           ├── admin/          # 管理后台（拆分为独立模块）
-│           │   ├── index.vue   # 管理后台主入口
-│           │   ├── components/ # 后台子组件
-│           │   │   ├── AdminLogin.vue
-│           │   │   ├── CopyCommandModal.vue
-│           │   │   ├── DatabasePanel.vue
-│           │   │   ├── DeleteServerModal.vue
-│           │   │   ├── EditServerModal.vue
-│           │   │   ├── ServerTable.vue
-│           │   │   └── SettingsPanel.vue
-│           │   └── composables/
-│           │       └── useTurnstile.js
-│           ├── Dashboard.vue    # 首页（接入 WebSocket 实时推送）
-│           └── ServerDetail.vue # 服务器详情页（历史图表 + 实时推送）
-├── scripts/
-│   ├── build.js                 # 前端构建脚本
-│   ├── build-github-page.js     # GitHub Pages 构建脚本
-│   └── ios-scriptable-widget.js # iOS Scriptable 小组件
-├── test/
-│   ├── README.md               # 测试工具说明
-│   ├── agent-config.js         # 探针配置下发测试
-│   ├── api-check.js            # 本地 API 检查工具
-│   ├── generate-sql.js         # 测试数据生成工具
-│   ├── mock-data.sql           # 模拟数据 SQL
-│   └── mock-sender.sh          # 模拟数据发送脚本（macOS）
-├── index.html
-├── jsconfig.json               # JS 配置
-├── package.json                # 项目依赖与 npm scripts
-├── package-lock.json           # npm 依赖锁定文件
-├── vite.config.js              # Vite 配置
-├── wrangler.toml               # Wrangler 本地开发配置
-├── API.md                      # 后端 API 文档
-├── AGENT_CONFIG.md             # 探针配置下发说明
-├── develop.md                  # 开发与架构说明
-├── theme-develop.md            # 前端主题开发文档
-├── todo.md                     # 待办事项列表
-└── .github/
-    └── workflows/
-        ├── deploy.yml             # GitHub Actions 自动部署到 Workers
-        ├── deploy-github-page.yml # GitHub Pages 自动部署
-        └── sync.yml               # 上游仓库自动同步
+{{time}}
 ```
 
-</details>
+可用模板变量：
 
-## ❓ 常见问题
+| 变量 | 说明 |
+| --- | --- |
+| `{{emoji}}` | 事件图标：恢复/测试为 `✅`，离线/告警为 `❌`，到期/混合状态为 `⚠️` |
+| `{{event}}` | 事件名称，例如“节点离线告警”“资源负载恢复” |
+| `{{client}}` / `{{clients}}` | 本次通知涉及的服务器名称，多个服务器用逗号连接 |
+| `{{count}}` | 本次通知涉及的服务器数量；默认模板不显示，但可自定义加入 |
+| `{{message}}` | 通知详情列表 |
+| `{{time}}` | UTC 发送时间 |
+| `{{notification}}` | 应用通知模板后的完整内容，通常用于 Webhook 的 `content` |
+| `{{title}}` | 固定标题 `💌 Cloudflare Server Monitor` |
 
-<details>
-<summary>常见问题</summary>
+支持的告警类型：
 
-**Q: 部署后返回API\_SECRET is required**
+- 离线告警：节点离线达到设定阈值后通知，恢复后发送恢复通知。
+- 到期提醒：服务器到期前 1 到 7 天内每天提醒，也可关闭。
+- 资源负载告警：按 CPU、内存、磁盘、上下行速率等指标配置规则。
 
-如果是部署后丢失API\_SECRET，请在Workers & Pages页面，点击 **Settings**，修改Build configuration的Deploy command为：`npx wrangler deploy --keep-vars`，重新设置API\_SECRET，下次部署会继续保留。旧key可用通过`cat /etc/systemd/system/cf-probe.service`或者`cat /etc/init.d/cf-probe`获取。
+配置后请先点击发送测试通知，再保存配置。
 
-如果是GitHub Action 自动部署，确保在 GitHub Secrets 中设置了 API\_SECRET 密钥。
+## 安全建议
 
-如果是一键部署，确保在Cloudflare Workers & Pages 中设置了 API\_SECRET 密钥。
+### API Secret
 
-**Q: 探针安装后不显示数据？**
+- 使用随机强密码，不要包含容易被 Shell 或 URL 转义影响的特殊字符。
+- 修改 `API_SECRET` 后，需要重新部署 Worker，并在所有服务器上重新安装或更新 Agent 命令。
+- 后台登录密码可以独立修改，建议不要长期和 `API_SECRET` 保持一致。
 
-检查服务器是否能访问 Worker URL，在安装命令参数后面加入 ` -debug=1`（目前仅支持linux系统），再查看探针日志：`journalctl -u cf-probe -f`，将错误信息发到Issue或者TG群，调试结束后删掉debug=1参数重新安装，避免日志过大。
+### JWT 与 WebSocket 认证
 
-**Q: 如何更换 API\_SECRET？**
+- 管理员登录成功后会签发 7 天有效期的 JWT；前端会用于后续管理请求，并设置 `cfsm_auth` HttpOnly Cookie。
+- 私有站点（`is_public !== 'true'`）会对 `/api/servers`、`/api/server`、`/api/history/all` 和 `/api/ws` 做登录校验；未授权的 WebSocket 不会转发到 Durable Object。
+- `/api/ws` 支持三种 JWT 认证来源：`Authorization: Bearer <token>`、`Cookie: cfsm_auth=<token>`、查询参数 `token` / `auth_token` / `ws_token`。
+- 浏览器原生 WebSocket 不能自定义 `Authorization` Header，内置前端同域连接走 `cfsm_auth` Cookie，跨域连接才在 URL 中追加 `token=<jwt>` 查询参数。
+- 查询参数 token 可能出现在访问日志中，请只通过 HTTPS 使用，并避免把带 token 的 WebSocket URL 分享给他人。
+- 后台可配置“前端 WSS 超时（分钟）”：默认 `0`，表示不因连接时长主动断开；设为正整数后，内置前端到时会断开实时订阅并弹窗让用户选择关闭或继续。
 
-更新 Cloudflare Workers & Pages 中的 `API_SECRET`，重新部署，并在所有服务器上重新安装探针。如果是GitHub Action 自动部署，需要在 GitHub Secrets 中更新 `API_SECRET`。
+### Turnstile
 
-**Q: D1 数据库免费额度够用吗？**
+可在后台启用 Cloudflare Turnstile，用于降低公开 API 和登录入口被刷的风险。多站点模式下，如果多个站点都启用 Turnstile，请保持 Site Key 一致。
 
-Cloudflare D1 免费版提供 5GB 存储和 5M 读取行/日、100K 写入行/日，足以支持服务器监控。
+### CORS
 
-写入行：1台服务器一天占用写入行是1.44k，免费写入额度是100k/天，理论上可用支持60+服务器的监控，如果修改上报频率为120秒可用翻倍。
+默认建议仅同源访问。如果需要独立前台或多站点聚合，在 `CORS_ALLOWED_ORIGINS` 中加入可信来源。
 
-读取行：1台服务器一天占用读行是8k左右，如果开启站点兼容，大概是1.6k，免费读行是5M/天，非常充裕
-主要是前端访问消耗的次数，限制了非登录用户 1 小时以上的查看，只要不被暴力刷额度，绝对够用。如果不放心，可以在后台开启 Turnstile 人机验证，也可以选择仅登录查看。
+### CSP
 
-**Q: D1 数据库免费额度超出扣费吗？**
+项目默认启用较保守的 Content Security Policy。第三方背景图、外部 CSS/JS、字体、图片和 WebSocket/API 域名需要加入后台 CSP 白名单后才会加载。
 
-超出不扣费，只会限制访问，第二天北京时间08:00重置
+内置允许的常见来源包括 Cloudflare Turnstile、Cloudflare Analytics、Google Fonts、GitHub Raw 和若干公开 API。添加第三方脚本前请先确认来源可信。
 
-**Q: 遇到其他异常问题怎么办？**
+## 主题与外观
 
-可以尝试在后台数据库管理中：
+项目内置默认主题，并支持：
 
-- 升级数据库：尝试修复数据库结构问题
-- 清空历史数据：清空数据库中的历史数据（⚠️ 注意：此操作将清除所有历史数据，请确保已备份重要信息）
+- 深色 / 浅色显示
+- 前台中文 / 英文切换
+- 自定义背景图、favicon、CSS、`<head>`
+- Mikus 模式
+- 主题商店
+- 第三方主题 GitHub tree 地址
+- 管理员预览主题
 
-**Q: 忘记密码？**
+第三方主题只反代主题仓库中的 `index.html` 与 `assets/`，管理后台仍使用内置主题。开发自定义主题请参考 [theme-develop.md](theme-develop.md)。
 
-进入Cloudflare后台，进入D1数据库（server-monitor-db），点击右上角explore data，进入后点击左侧的`setting`表，双击`site_options`右侧的value，可以看到`用户名`和md5加密的`密码`，password修改成`e10adc3949ba59abbe56e057f20f883e`，即默认密码`123456`，右上角点Commit 1 change，弹出的确认框点确认即可。然后访问后台用默认密码登录即可。
+## 升级与维护
 
-**Q: 地区并列显示港澳台和国家**
+### 升级 Worker
 
-为了方便用户查看，前端并列显示港澳台和国家，但是旗帜都统一是中国国旗，后端返回的是region字段，这里是输出国家和地区，而不是国家，地图符合中华人民共和国自然资源部标准地图制作（审图号：GS(2023)2767 号）。
+如果通过 Fork 部署，同步上游仓库即可触发重新部署：
 
-</details>
+- 手动同步：GitHub 仓库页面点击 Sync fork -> Update branch。
+- 自动同步：启用 `Upstream Sync` 工作流，默认每天 UTC 00:00 检查上游更新。
 
-## 📸 界面预览
+一键部署方式建议重新部署到同一个项目，或迁移到 Fork + GitHub / Cloudflare 自动部署模式。
 
-<details>
-<summary>界面预览</summary>
+### 升级 Agent
 
-![image](https://github.com/user-attachments/assets/0527f847-4631-47ad-8315-3f80ebba42d2)
-![image](https://github.com/user-attachments/assets/a9c1aefd-42f7-4805-aa42-bbe9e58aed59)
-![image](https://github.com/user-attachments/assets/527bcf04-3124-4f1c-b052-451bccae961d)
-![image](https://github.com/user-attachments/assets/ac6f6fbb-b9fb-45cd-93e5-ca08bbad9ecb)
-![image](https://github.com/user-attachments/assets/b5436816-54bd-4512-a65c-bf963fd4874c)
-![image](https://github.com/user-attachments/assets/ba0d3605-ef64-4be1-884b-9506f20277a8)
-![image](https://github.com/user-attachments/assets/197767cc-028b-4ec1-b41f-5cadc2b25629)
+Go 版本 Agent 会保留原配置，直接执行安装命令即可升级。
 
-浅色风格
-![image](https://github.com/user-attachments/assets/3a7f3204-0a68-4f59-9822-f7f1b5479822)
-![image](https://github.com/user-attachments/assets/e100d984-3165-4f38-948a-625249b4600a)
-![image](https://github.com/user-attachments/assets/7d266ff3-0db7-477b-8029-c76e42298002)
+Linux / OpenWrt / Synology DSM / FreeBSD / macOS：
 
-</details>
+```bash
+curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install
+```
 
-## 🛠️ 本地开发
+Windows 管理员 PowerShell：
 
-<details>
-<summary>本地开发步骤</summary>
+```powershell
+$script = "$env:TEMP\install-cf-probe.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+PowerShell -ExecutionPolicy Bypass -File $script install
+```
+
+### 卸载 Agent
+
+Go 版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- uninstall
+```
+
+旧 Shell / PowerShell 版本已不再维护，下面命令仅用于清理历史 Shell / PowerShell 安装。请按当初安装时使用的系统脚本选择对应卸载命令；如果当前运行的是 Go Agent，请使用上面的 Go 卸载命令。
+
+| 旧版系统脚本 | 卸载命令 |
+| --- | --- |
+| Linux / systemd | `curl -sL https://你的 Worker 域名/install.sh \| bash -s uninstall` |
+| Alpine / OpenRC | `curl -sL https://你的 Worker 域名/install-alpine.sh \| sh -s uninstall` |
+| OpenWrt / procd | `curl -sL https://你的 Worker 域名/install-openwrt.sh \| sh -s uninstall` |
+| macOS | `curl -sL https://你的 Worker 域名/install-mac.sh \| sudo bash -s uninstall` |
+| Synology DSM | `curl -sL https://你的 Worker 域名/install-synology.sh \| bash -s uninstall` |
+
+Windows 旧 PowerShell 版本：
+
+```powershell
+irm https://你的 Worker 域名/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1
+powershell -ExecutionPolicy Bypass -File .\cf-server-monitor.ps1 uninstall
+```
+
+Go 版本和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的服务和文件。如果曾经从 Shell / PowerShell 切换到 Go，或反向切换过，请分别执行对应版本的卸载命令，避免残留旧服务、定时任务或配置文件。
+
+### 数据库维护
+
+后台 -> Database Management 提供：
+
+- 升级数据库：补齐新版本字段和索引，不删除现有数据。
+- 清空历史数据：删除历史监控记录，保留服务器列表和站点设置。
+
+从旧版本升级到包含 GPU、磁盘 IO、丢包率或新历史结构的版本后，如果页面提示数据库字段缺失，请先执行升级数据库，再升级 Agent。
+
+### 定时任务
+
+`wrangler.toml` 中包含两个 Cron：
+
+| Cron          | 说明                         |
+| ------------- | -------------------------- |
+| `*/1 * * * *` | 每分钟检测离线节点并发送告警             |
+| `0 * * * *`   | 每小时执行合并任务，包括月表轮换、旧表清理、到期检测 |
+
+## 本地开发
 
 ### 环境要求
 
 - Node.js 18+
-- npm 或 pnpm
+- npm
+- Wrangler 4
 
-### 开发步骤
-
-根目录新建 `.env` 文件，添加默认 `API_SECRET`：
-
-```bash
-API_SECRET=123456
-```
-
-然后执行以下命令进行本地开发：
+### 常用命令
 
 ```bash
 # 安装依赖
 npm install
 
-# 创建 D1 数据库（首次）
+# 首次创建 D1 数据库
 npx wrangler d1 create server-monitor-db
 
-# 启动本地 Worker（默认 https://localhost:8787）
+# 启动本地 Worker，默认 https://localhost:8787
 npm run dev
 
-# 单独启动前端 Vite 开发模式（默认 http://localhost:5173）
+# 单独启动前端 Vite，默认 http://localhost:5173
 npm run dev:frontend
 
-# 构建前端生产版本
+# 构建前端
 npm run build:frontend
 
 # 部署到 Cloudflare Workers
 npm run deploy
+
+# 测试历史查询
+npm run test:history-query
+
+# 测试 Agent 配置下发
+npm run test:agent-config
 ```
 
-定时任务
+本地 `.env` 至少需要：
 
-```
-https://localhost:8787/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+* // 每分钟执行一次（离线检测）
-https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+* // 每小时执行一次（合并任务）
-https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+0+*+*+0 // 每周执行一次（测试使用）
-https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+12+*+*+* // 每天12点执行一次（测试使用）
+```bash
+API_SECRET=123456
 ```
 
-### 本地测试数据
+### 测试数据
 
-支持生成本地测试数据，方便在部署前进行功能测试：
-
-1. 进入 `test` 目录查看详细说明
-2. 运行测试数据生成脚本
-3. 导入生成的 SQL 数据到本地 D1 数据库
-4. 启动本地开发服务器进行测试
-
-```
+```bash
 node test/generate-sql.js
 wrangler d1 execute server-monitor-db --file=test/mock-data.sql
 ```
 
-详细步骤见 [test/README.md](test/README.md)
+更多本地测试说明见 [test/README.md](test/README.md)。
 
-### API 接口测试
-
-项目提供了 `api-check.js` 接口测试工具，用于验证本地开发环境的 API 接口是否正常工作：
+### API 检查
 
 ```bash
-# 默认配置测试
 node test/api-check.js
-
-# 指定参数测试
 node test/api-check.js --base-url=http://localhost:8787 --api-secret=123456
-
-# 查看帮助
 node test/api-check.js --help
 ```
 
-**测试覆盖范围：**
+完整接口说明见 [API.md](API.md)。
 
-- 未登录接口：`/api/config`、`/api/servers`、`/api/server`、`/update` 等
-- 登录流程：登录接口验证
-- 已登录接口：隐藏服务器访问、历史数据查询等
-- 后台管理：服务器增删改查、设置管理等
+## 项目结构
 
-**选项参数：**
+```text
+CF-Server-Monitor/
+├── public/                  # 安装脚本、系统图标、旗帜、静态资源
+├── scripts/                 # 构建脚本、GitHub Pages 构建、iOS 小组件
+├── src/
+│   ├── database/            # D1 表结构、索引、迁移
+│   ├── durable/             # Durable Object 实时广播
+│   ├── frontend/            # Vue 3 前台与管理后台
+│   ├── handlers/            # Worker 路由处理
+│   ├── middleware/          # 鉴权中间件
+│   ├── services/            # 通知服务
+│   └── utils/               # 缓存、CORS、CSP、指标处理、版本检查
+├── test/                    # 本地测试和模拟数据工具
+├── API.md                   # REST / WebSocket API 文档
+├── theme-develop.md         # 第三方主题开发文档
+├── wrangler.toml            # 本地 Wrangler 配置
+└── version.json             # Worker / Agent 版本
+```
 
-| 参数                 | 说明          | 默认值                     |
-| ------------------ | ----------- | ----------------------- |
-| `--base-url`       | 本地服务地址      | `http://localhost:8787` |
-| `--api-secret`     | API\_SECRET | `123456`                |
-| `--admin-user`     | 管理员用户名      | `admin`                 |
-| `--admin-password` | 管理员密码       | 使用 API\_SECRET          |
-| `--timeout`        | 请求超时时间(ms)  | `10000`                 |
+## 常见问题
+
+### 部署后返回 `API_SECRET is required`
+
+说明 Worker 没有读取到环境变量。请在 Cloudflare Workers & Pages 的 Variables and Secrets 中删除旧值后重新添加 `API_SECRET`，保存并等待重新部署完成。
+
+目前Cloudflare版本原因，可能需要先改动值保存一次，再改回去触发重新部署。
+
+### Agent 没有上报数据
+
+先确认服务器可以访问 Worker URL。如需开启调试，可在安装参数后追加 `-debug=1`。不同系统的日志查看命令不固定，请参考 [cfsm-agent 文档](https://github.com/huilang-me/cfsm-agent) 中对应系统的状态与日志说明。
+
+排查完成后移除 debug 参数并重新安装，避免日志持续增大。
+
+### 如何更换 `API_SECRET`
+
+在 Cloudflare 中修改 `API_SECRET`，重新部署 Worker，然后在所有服务器上重新复制并执行安装命令。使用 GitHub Actions 部署时，也要同步更新 GitHub Secret。
+
+### D1 免费额度够用吗
+
+默认 60 秒上报间隔按约 60 台服务器设计；改为 120 秒后可以进一步降低写入。读取主要来自前端访问和历史查询，项目已通过缓存、采样和登录限制降低消耗。实际额度以 Cloudflare 控制台显示为准。
+
+### 背景图没有显示
+
+通常是 CSP 拦截了第三方图片资源。进入管理后台 -> 外观设置 -> CSP 静态文件域名白名单，添加背景图所在域名的 origin，例如背景图地址是 `https://cdn.example.com/path/bg.webp`，只填写 `https://cdn.example.com`。
+
+如果背景图地址会跳转或经过 CDN 重定向，需要打开浏览器开发者工具查看最终加载的图片地址，并把最终地址对应的域名加入白名单。修改后保存配置并刷新页面。
+
+### 忘记后台密码
+
+进入 Cloudflare D1 数据库 `server-monitor-db`，打开 `setting` 表，编辑 `site_options` 的 `password` 字段。旧版 MD5 兼容值 `e10adc3949ba59abbe56e057f20f883e` 对应密码 `123456`，保存后可用该密码登录，再到后台重新设置强密码。
+
+### 国内服务器无法上报
+
+建议绑定自定义域名到 Worker。无法绑定时，可临时通过 hosts 指向可用的 Cloudflare CDN IP：
+
+```bash
+echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
+```
+
+### Ping 结果异常或全是 1
+
+检查服务器是否启用了代理。OpenWrt / 软路由环境中，部分代理插件可能影响延迟测试，可关闭代理或更换透明代理方案后再测试。
+
+### 地图中的地区显示说明
+
+前端会并列展示港澳台和国家/地区信息。地图基于中华人民共和国自然资源部标准地图制作，审图号：GS(2023)2767 号。
+
+## 界面预览
+
+<details>
+<summary>深色风格</summary>
+
+![Dashboard dark](https://github.com/user-attachments/assets/4e6a5db4-65d3-4d40-91b9-9e46ee140d0d)
+![Dashboard dark detail](https://github.com/user-attachments/assets/c10a1376-3d4c-4a58-8d3b-dc904b30f174)
+![Server detail dark](https://github.com/user-attachments/assets/a9c1aefd-42f7-4805-aa42-bbe9e58aed59)
+![Admin dark](https://github.com/user-attachments/assets/527bcf04-3124-4f1c-b052-451bccae961d)
+![Map dark](https://github.com/user-attachments/assets/ac6f6fbb-b9fb-45cd-93e5-ca08bbad9ecb)
+![Theme dark](https://github.com/user-attachments/assets/b5436816-54bd-4512-a65c-bf963fd4874c)
+![Table dark](https://github.com/user-attachments/assets/ba0d3605-ef64-4be1-884b-9506f20277a8)
+![Mobile dark](https://github.com/user-attachments/assets/197767cc-028b-4ec1-b41f-5cadc2b25629)
 
 </details>
 
-## 📄 许可证
+<details>
+<summary>浅色风格</summary>
 
-MIT License
+![Dashboard light](https://github.com/user-attachments/assets/8d310095-2b93-40f3-b762-323fbe6595f6)
+![Server detail light](https://github.com/user-attachments/assets/bfa48a70-5379-495f-8599-fc9bf49c4801)
+![Admin light](https://github.com/user-attachments/assets/e100d984-3165-4f38-948a-625249b4600a)
+![Map light](https://github.com/user-attachments/assets/7d266ff3-0db7-477b-8029-c76e42298002)
 
-## 🌐 社区
+</details>
 
-- [Telegram 群组](https://t.me/cfServerMonitor)
+## 相关文档
 
-## 🙏 致谢
+- [API.md](API.md)：REST API、WebSocket、鉴权、错误码和数据结构
+- [https://github.com/huilang-me/cfsm-agent](cfsm-agent)：Go 版本 Agent 配置、升级、日志与排障
+- [theme-develop.md](theme-develop.md)：第三方主题开发
+- [test/README.md](test/README.md)：本地模拟数据和测试流程
+
+## 社区
+
+- Telegram 群组：<https://t.me/cfServerMonitor>
+- 在线演示：<https://demo.huilang.me/>
+
+## 支持项目
+
+如果这个项目对你有帮助，欢迎通过以下方式支持后续维护。
+
+<p>
+  <img src="./donate/wechat-reward.jpg" alt="微信赞赏码" width="215">
+</p>
+
+- 微信赞赏：扫码支持
+
+## 致谢
 
 - [CF-Server-Monitor-Pro](https://github.com/a63414262/CF-Server-Monitor-Pro)
 - [Cloudflare Workers](https://workers.cloudflare.com/)
 - [Vue 3](https://vuejs.org/)
-- [Vite](https://vitejs.dev/)
+- [Vite](https://vite.dev/)
 - [Chart.js](https://www.chartjs.org/)
 - [Leaflet](https://leafletjs.com/)
-- 感谢 [NodeSeek](https://www.nodeseek.com/post-763025-1)  [LINUX DO](https://linux.do/) 社区的支持与推广
+- 感谢 [NodeSeek](https://www.nodeseek.com/post-763025-1) 和 [LINUX DO](https://linux.do/) 社区的支持与推广
+
+## 许可证
+
+MIT License

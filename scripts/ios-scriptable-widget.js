@@ -92,7 +92,7 @@ function formatBytes(bytes) {
     n /= 1024;
     i++;
   }
-  const v = n < 10 && i > 0 ? n.toFixed(1) : Math.round(n);
+  const v = n.toFixed(1);
   return `${v} ${units[i]}`;
 }
 
@@ -102,6 +102,7 @@ function trafficUsedBytes(server) {
   const type = server.traffic_calc_type || "total";
   if (type === "dl") return rx;
   if (type === "ul") return tx;
+  if (type === "max") return Math.max(rx, tx);
   return rx + tx;
 }
 

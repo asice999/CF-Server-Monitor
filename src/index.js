@@ -1,23 +1,37 @@
 import { initDatabase, weeklyCleanup, getMetricsHistory, clearHistory } from './database/schema.js';
-import { checkOfflineNodes, checkExpiringServers } from './services/notification.js';
+import { checkOfflineNodes, checkExpiringServers, checkResourceAlerts } from './services/notification.js';
 import { updateDatabase } from './database/updateDatabase.js';
 import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
-import { handleUpdate, handleWebSocketUpgrade } from './handlers/update.js';
+import { handleUpdate, handleWebSocketUpgrade, handleUpdateWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
-import { loadSettings, loadSiteSettings, loadAppearanceOptions, setDebug, debug, getCurrentVersion } from './utils/settings.js';
+import { handleTheme } from './handlers/theme.js';
+import { loadSettings, loadSiteSettings, loadAppearanceOptions, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, setDebug, debug, getCurrentVersion } from './utils/settings.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
 import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from './utils/cache.js';
 import { AppError, createSuccessResponse, createUnauthorizedResponse, createBadRequestResponse, createNotFoundResponse, createErrorResponse } from './utils/errors.js';
 import { verifyTurnstileToken } from './utils/common.js';
 import { getCorsAllowedOrigins, createOptionsResponse, applyCors } from './utils/cors.js';
 import { getRemoteVersion } from './utils/version.js';
+import {
+  HISTORY_ALL_QUERY_COLUMNS
+} from './utils/historyFields.js';
 // Durable Objects: 实时指标广播
 // 显式 import + extends，确保 wrangler 静态分析器能在入口文件直接识别此 DO 类
 import { MetricsBroadcaster as _MetricsBroadcaster }
   from './durable/MetricsBroadcaster.js';
 
 export class MetricsBroadcaster extends _MetricsBroadcaster {}
+
+function cleanThemeAssetResponse(response) {
+  const headers = new Headers(response.headers);
+  headers.delete('X-CFSM-Theme-Asset');
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
 
 async function getEncryptionKey(env, sys) {
   let secret = (sys && sys.jwt_secret) || env.TURNSTILE_SECRET_KEY || env.API_SECRET || 'default_secret_key_for_turnstile_encryption';
@@ -98,7 +112,7 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
     return simpleAuthResponse();
   }
   
-  if (hours > 1 && !isLoggedIn) {
+  if (hours > 24 && !isLoggedIn) {
     return createUnauthorizedResponse();
   }
   
@@ -108,15 +122,25 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
   // 最多查询7天数据
   const clampedHours = Math.min(hours, 168);
   const cacheDuration = getCacheDuration(clampedHours);
+  const longHistoryPoints = clampedHours > 1
+    ? Number(normalizeLongHistoryPoints(sys.long_history_points))
+    : null;
 
-  const cached = getMetricsHistoryCache(id, clampedHours, columns);
+  const cached = getMetricsHistoryCache(id, clampedHours, columns, longHistoryPoints);
   if (cached && Date.now() - cached.timestamp < cacheDuration) {
     return createSuccessResponse(cached.data, { 'X-Cache': 'HIT' });
   }
   
   let data;
   try {
-    data = await getMetricsHistory(env.DB, id, clampedHours, columns, server);
+    data = await getMetricsHistory(
+      env.DB,
+      id,
+      clampedHours,
+      columns,
+      server,
+      longHistoryPoints
+    );
   } catch (e) {
     const message = e && e.message ? e.message : String(e);
     if (/no such column/i.test(message)) {
@@ -131,7 +155,7 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
     throw e;
   }
   
-  setMetricsHistoryCache(id, clampedHours, columns, data);
+  setMetricsHistoryCache(id, clampedHours, columns, data, longHistoryPoints);
   
   return createSuccessResponse(data, { 'X-Cache': 'MISS' });
 }
@@ -155,11 +179,20 @@ export default {
       return createOptionsResponse(request, corsAllowedOrigins);
     }
 
-    if (env.ASSETS && method === 'GET') {
+    if (method === 'GET' && path === '/admin/') {
+      const target = new URL(request.url);
+      const search = target.search;
+      target.pathname = '/admin';
+      target.search = '';
+      target.hash = `admin${search}`;
+      return Response.redirect(target.toString(), 302);
+    }
+
+    if (method === 'GET' && path.startsWith('/assets/')) {
       try {
-        const res = await env.ASSETS.fetch(new Request(`http://static${path}`, request));
-        if (res.ok) {
-          return applyCors(res, request, corsAllowedOrigins);
+        const themeAssetResponse = await serveFrontend(request, env, await loadSettings(env.DB));
+        if (themeAssetResponse.headers.get('X-CFSM-Theme-Asset') === '1') {
+          return applyCors(cleanThemeAssetResponse(themeAssetResponse), request, corsAllowedOrigins);
         }
       } catch (e) {
       }
@@ -224,6 +257,7 @@ export default {
 
     const routes = [
       { method: 'POST', path: '/update', handler: () => handleUpdate(request, env, ctx) },
+      { method: 'GET', path: '/update', handler: () => handleUpdateWebSocketUpgrade(request, env) },
       { method: 'GET', path: '/__do/health', handler: async () => {
         if (!env.METRICS_BROADCASTER) {
           return createSuccessResponse({ ok: false, reason: 'DO not bound' });
@@ -269,17 +303,37 @@ export default {
           turnstile_login_enabled: turnstileEnabled || turnstileLoginEnabled,
           turnstile_site_key: sys.turnstile_site_key || '',
           site_title: appearanceOptions.site_title || '',
+          display_mode: appearanceOptions.display_mode || 'bar',
+          theme_options: appearanceOptions.theme_options || {},
           verified: verified,
           turnstile_verified: turnstileVerified,
-          show_long_history: sys.show_long_history === 'true'
+          frontend_ws_timeout_minutes: Number(normalizeFrontendWsTimeoutMinutes(sys.frontend_ws_timeout_minutes)),
+          long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
         });
+      }},
+      { method: 'GET', path: '/theme', handler: async () => {
+        const themeResult = await handleTheme()
+        if (!themeResult.ok) {
+          return new Response(JSON.stringify({
+            error: themeResult.error || 'themeStoreProxyFailed',
+            code: 502,
+            fallback: 'client'
+          }), {
+            status: 502,
+            headers: { 'Content-Type': 'application/json' }
+          })
+        }
+
+        return createSuccessResponse(themeResult.themeStore, {
+          'X-CFSM-Theme-Source': themeResult.cached ? 'cache' : 'raw'
+        })
       }},
       { method: 'GET', path: '/api/server', handler: async () => {
         await ensureSiteSettings();
         return handleServerAPI(request, env, sys);
       }},
       { method: 'GET', path: '/api/servers', handler: async () => {
-        await ensureSiteSettings();
+        await ensureFullSettings();
         return handleServersAPI(request, env, sys);
       }},
       { method: 'GET', path: '/api/ws', handler: async () => handleWebSocketUpgrade(request, env) },
@@ -288,13 +342,13 @@ export default {
         await ensureSiteSettings();
         const id = url.searchParams.get('id');
         const hours = parseFloat(url.searchParams.get('hours') || '24');
-        const allColumns = 'cpu, gpu, gpu_info, ram_total, ram_used, disk_total, disk_used, processes, net_in_speed, net_out_speed, tcp_conn, udp_conn, ping_ct, ping_cu, ping_cm, ping_bd, loss_ct, loss_cu, loss_cm, loss_bd, swap_total, swap_used, load_avg, region';
+        const allColumns = HISTORY_ALL_QUERY_COLUMNS.join(', ');
         // 后续版本可以删掉region 字段，用于升级数据库提示
         return fetchHistoryData(env, request, id, hours, allColumns, sys);
       }},
       { method: 'POST', path: '/admin/api', handler: async () => {
         await ensureSiteSettings();
-        return handleAdminAPI(request, env, sys, ensureFullSettings);
+        return handleAdminAPI(request, env, sys, ensureFullSettings, ctx);
       }},
       { method: 'POST', path: '/updateDatabase', handler: async () => {
         await ensureSiteSettings();
@@ -344,8 +398,8 @@ export default {
       }
     }
 
-    const appearanceOptions = await loadAppearanceOptions(env.DB);
-    const frontendResponse = await serveFrontend(request, env, appearanceOptions);
+    const fullSettings = await loadSettings(env.DB);
+    const frontendResponse = await serveFrontend(request, env, fullSettings);
     return applyCors(frontendResponse, request, corsAllowedOrigins);
   },
 
@@ -365,6 +419,9 @@ export default {
         debug('[Cron] 开始执行离线节点检测');
         await checkOfflineNodes(env.DB);
         debug('[Cron] 离线节点检测完成');
+        debug('[Cron] 开始执行资源负载告警检测');
+        await checkResourceAlerts(env);
+        debug('[Cron] 资源负载告警检测完成');
       }
     } else if (cron === '0 * * * *') {
       if (day === 0 && hour === 0) {

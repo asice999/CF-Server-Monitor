@@ -1,15 +1,38 @@
 import { md5Hash } from './common.js';
+import { isWssReportEnabled } from './settings.js';
 
-export const AGENT_CONFIG_SCHEMA_VERSION = 2;
+export const AGENT_CONFIG_SCHEMA_VERSION = 5;
+export const AGENT_CONFIG_LEGACY_SCHEMA_VERSION = 3;
+export const AGENT_CONFIG_CONNECTION_MODE_SCHEMA_VERSION = 4;
 export const AGENT_CONFIG_SCHEMA_HEADER = 'X-Agent-Config-Schema';
 export const AGENT_CONFIG_MD5_HEADER = 'X-Agent-Config-Md5';
 export const MAX_TRAFFIC_CORRECTION_GB = 1000000;
+export const CONNECTION_MODE_AUTO = 'auto';
+export const CONNECTION_MODE_HTTP = 'http';
+export const DEFAULT_WSS_REPORT_INTERVAL = 2;
 
 const ALLOWED_COLLECT_INTERVALS = new Set([0, 1, 2, 5, 10]);
 const ALLOWED_REPORT_INTERVALS = new Set([30, 60, 120, 180]);
+const ALLOWED_WSS_REPORT_INTERVALS = new Set([1, 2, 3, 4, 5]);
+const ALLOWED_CONNECTION_MODES = new Set([CONNECTION_MODE_AUTO, CONNECTION_MODE_HTTP]);
 const PING_NODE_HOST_PATTERN = /^[a-zA-Z0-9._-]+$/;
 const IPV4_PATTERN = /^(?:\d{1,3}\.){3}\d{1,3}$/;
 const IPV4_LIKE_PATTERN = /^(?:\d+\.){3}\d+$/;
+const NETWORK_INTERFACE_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+
+function normalizeSchemaVersion(value) {
+  const version = Number(value);
+  return Number.isInteger(version) && version >= AGENT_CONFIG_LEGACY_SCHEMA_VERSION && version <= AGENT_CONFIG_SCHEMA_VERSION
+    ? version
+    : AGENT_CONFIG_SCHEMA_VERSION;
+}
+
+export function normalizeAgentConfigSchemaVersion(value) {
+  const version = Number(value);
+  return Number.isInteger(version) && version >= AGENT_CONFIG_LEGACY_SCHEMA_VERSION && version <= AGENT_CONFIG_SCHEMA_VERSION
+    ? version
+    : null;
+}
 
 function validateInteger(name, value, allowedValues = null, min = null, max = null) {
   if (typeof value !== 'number' || !Number.isInteger(value)) {
@@ -38,6 +61,18 @@ export function validateAgentConfigInput(input) {
   );
   if (reportError) return { valid: false, error: reportError };
 
+  const wssReportInterval = input.wss_report_interval === undefined
+    ? DEFAULT_WSS_REPORT_INTERVAL
+    : input.wss_report_interval;
+  const wssReportError = validateInteger(
+    'wss_report_interval',
+    wssReportInterval,
+    null,
+    1,
+    5
+  );
+  if (wssReportError) return { valid: false, error: wssReportError };
+
   const resetError = validateInteger('reset_day', input.reset_day, null, 0, 31);
   if (resetError) return { valid: false, error: resetError };
 
@@ -52,12 +87,19 @@ export function validateAgentConfigInput(input) {
     return { valid: false, error: 'configuration would create more than 300 samples per report' };
   }
 
+  const connectionMode = normalizeConnectionMode(input.connection_mode);
+  if (!ALLOWED_CONNECTION_MODES.has(connectionMode)) {
+    return { valid: false, error: 'connection_mode is not allowed' };
+  }
+
   return {
     valid: true,
     config: {
       collect_interval: input.collect_interval,
       report_interval: input.report_interval,
+      wss_report_interval: wssReportInterval,
       reset_day: input.reset_day,
+      connection_mode: connectionMode,
       schema_version: AGENT_CONFIG_SCHEMA_VERSION
     }
   };
@@ -68,29 +110,8 @@ function storedInteger(value, allowedValues, fallback) {
   return Number.isInteger(number) && allowedValues.has(number) ? number : fallback;
 }
 
-function normalizeAgentVersionForCompare(value) {
-  if (value === null || value === undefined) return '';
-  return String(value)
-    .trim()
-    .replace(/[^0-9A-Za-z.+_-]/g, '')
-    .replace(/^v(?=\d)/i, '')
-    .toLowerCase()
-    .slice(0, 64);
-}
-
-export function isAgentAutoUpdateEnabled(value) {
-  return String(value ?? '').trim() === '1';
-}
-
-export function shouldSendAgentUpdate(clientAgentVersion, latestAgentVersion) {
-  const current = normalizeAgentVersionForCompare(clientAgentVersion);
-  const latest = normalizeAgentVersionForCompare(latestAgentVersion);
-  return !!current && !!latest && current !== latest;
-}
-
-export function appendAgentUpdateParam(body, shouldUpdate) {
-  if (!shouldUpdate) return body;
-  return `${body ? `${body}&` : ''}update=1`;
+export function normalizeWssReportInterval(value) {
+  return storedInteger(value, ALLOWED_WSS_REPORT_INTERVALS, DEFAULT_WSS_REPORT_INTERVAL);
 }
 
 function isValidIpv4(host) {
@@ -148,6 +169,48 @@ export function sanitizePingNode(value) {
   return result.valid ? result.value : '';
 }
 
+export function validateNetworkInterfaces(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { valid: true, value: '' };
+  if (raw.length > 255 || /[/@?#\\[\]]/.test(raw)) {
+    return { valid: false };
+  }
+
+  const seen = new Set();
+  const interfaces = [];
+  for (const item of raw.split(',')) {
+    const name = item.trim();
+    if (!name) continue;
+    if (name.length > 64 || !NETWORK_INTERFACE_PATTERN.test(name)) {
+      return { valid: false };
+    }
+    if (!seen.has(name)) {
+      seen.add(name);
+      interfaces.push(name);
+    }
+  }
+
+  const normalized = interfaces.join(',');
+  if (normalized.length > 255) return { valid: false };
+  return { valid: true, value: normalized };
+}
+
+export function sanitizeNetworkInterfaces(value) {
+  const result = validateNetworkInterfaces(value);
+  return result.valid ? result.value : '';
+}
+
+export function normalizeConnectionMode(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === CONNECTION_MODE_AUTO || raw === 'wss' || raw === 'websocket') {
+    return CONNECTION_MODE_AUTO;
+  }
+  if (raw === CONNECTION_MODE_HTTP || raw === 'post') {
+    return CONNECTION_MODE_HTTP;
+  }
+  return '';
+}
+
 export function isValidTrafficCorrection(value) {
   let number;
   if (typeof value === 'number') {
@@ -164,9 +227,11 @@ export function normalizeTrafficCorrection(value) {
   return isValidTrafficCorrection(value) ? Number(value) : 0;
 }
 
-export function buildAgentConfig(server, settings = null) {
+export function buildAgentConfig(server, settings = null, schemaVersion = AGENT_CONFIG_SCHEMA_VERSION) {
+  const version = normalizeSchemaVersion(schemaVersion);
   const collectInterval = storedInteger(server?.collect_interval, ALLOWED_COLLECT_INTERVALS, 0);
   let reportInterval = storedInteger(server?.report_interval, ALLOWED_REPORT_INTERVALS, 60);
+  const wssReportInterval = normalizeWssReportInterval(server?.wss_report_interval);
   if (collectInterval > 0 && reportInterval < collectInterval) reportInterval = 60;
 
   const resetNumber = typeof server?.reset_day === 'number'
@@ -180,8 +245,9 @@ export function buildAgentConfig(server, settings = null) {
   const customCu = sanitizePingNode(server?.custom_cu || settings?.custom_cu || '');
   const customCm = sanitizePingNode(server?.custom_cm || settings?.custom_cm || '');
   const customBd = sanitizePingNode(server?.custom_bd || settings?.custom_bd || '');
+  const networkInterface = sanitizeNetworkInterfaces(server?.interface || '');
 
-  return {
+  const config = {
     collect_interval: collectInterval,
     report_interval: reportInterval,
     reset_day: resetDay,
@@ -189,19 +255,46 @@ export function buildAgentConfig(server, settings = null) {
     custom_cu: customCu,
     custom_cm: customCm,
     custom_bd: customBd,
-    schema_version: AGENT_CONFIG_SCHEMA_VERSION
+    interface: networkInterface,
+    schema_version: version
   };
+
+  if (version >= AGENT_CONFIG_CONNECTION_MODE_SCHEMA_VERSION) {
+    const connectionMode = normalizeConnectionMode(server?.connection_mode) || CONNECTION_MODE_AUTO;
+    const wssEnabled = isWssReportEnabled(settings);
+    config.connection_mode = wssEnabled ? connectionMode : CONNECTION_MODE_HTTP;
+    if (
+      version >= AGENT_CONFIG_SCHEMA_VERSION &&
+      config.connection_mode === CONNECTION_MODE_AUTO &&
+      wssEnabled
+    ) {
+      config.wss_report_interval = wssReportInterval;
+      if (config.collect_interval === 0 || config.collect_interval > wssReportInterval) {
+        config.collect_interval = wssReportInterval;
+      }
+    }
+  }
+
+  return config;
 }
 
 export function serializeAgentConfig(config) {
-  return `collect_interval=${config.collect_interval}` +
+  let serialized = `collect_interval=${config.collect_interval}` +
     `&report_interval=${config.report_interval}` +
     `&reset_day=${config.reset_day}` +
     `&schema_version=${config.schema_version}` +
     `&custom_ct=${config.custom_ct}` +
     `&custom_cu=${config.custom_cu}` +
     `&custom_cm=${config.custom_cm}` +
-    `&custom_bd=${config.custom_bd}`;
+    `&custom_bd=${config.custom_bd}` +
+    `&interface=${config.interface}`;
+  if (Object.prototype.hasOwnProperty.call(config, 'connection_mode')) {
+    serialized += `&connection_mode=${config.connection_mode}`;
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'wss_report_interval')) {
+    serialized += `&wss_report_interval=${config.wss_report_interval}`;
+  }
+  return serialized;
 }
 
 export function serializeCorrection(correction) {
@@ -210,8 +303,8 @@ export function serializeCorrection(correction) {
     `&tx_correction=${correction.tx_correction}`;
 }
 
-export async function describeAgentConfig(server, settings = null) {
-  const config = buildAgentConfig(server, settings);
+export async function describeAgentConfig(server, settings = null, schemaVersion = AGENT_CONFIG_SCHEMA_VERSION) {
+  const config = buildAgentConfig(server, settings, schemaVersion);
   const serialized = serializeAgentConfig(config);
   const md5 = await md5Hash(serialized);
 

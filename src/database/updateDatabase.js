@@ -1,4 +1,12 @@
 import { debug, getSettingByKey } from '../utils/settings.js';
+import {
+  detectBillingCycle,
+  detectCurrencySymbol,
+  normalizeBillingCycle,
+  normalizeCurrency,
+  normalizePrice
+} from '../utils/serverBilling.js';
+import { HISTORY_UPGRADE_COLUMNS } from '../utils/historyFields.js';
 
 
 export async function updateDatabase(db) {
@@ -111,16 +119,23 @@ export async function addServerColumns(db) {
   try {
     const { results: columns } = await db.prepare(`PRAGMA table_info(servers)`).all();
     const existingCols = columns.map(c => c.name);
+    const shouldMigrateLegacyPrice = !existingCols.includes('billing_cycle');
     
     const newCols = {
       is_hidden: "TEXT DEFAULT '0'",
       offline_notify_disabled: "TEXT DEFAULT '0'",
       sort_order: "INTEGER DEFAULT 0",
+      region: "TEXT DEFAULT ''",
       tags: "TEXT DEFAULT ''",
       note: "TEXT DEFAULT ''",
+      billing_cycle: "TEXT DEFAULT 'month'",
+      auto_renewal: "TEXT DEFAULT '0'",
+      currency: "TEXT DEFAULT '¥'",
       reset_day: "INTEGER DEFAULT 1",
       collect_interval: "INTEGER DEFAULT 0",
       report_interval: "INTEGER DEFAULT 60",
+      wss_report_interval: "INTEGER DEFAULT 2",
+      connection_mode: "TEXT DEFAULT 'auto'",
       auto_update: "TEXT DEFAULT '0'",
       custom_ct: "TEXT DEFAULT ''",
       custom_cu: "TEXT DEFAULT ''",
@@ -129,6 +144,7 @@ export async function addServerColumns(db) {
       rx_correction: "REAL DEFAULT NULL",
       tx_correction: "REAL DEFAULT NULL",
       traffic_calc_type: "TEXT DEFAULT 'total'",
+      interface: "TEXT DEFAULT ''",
       history_partition_id: "INTEGER DEFAULT 0",
       timestamp: "INTEGER DEFAULT 0"
     };
@@ -136,12 +152,31 @@ export async function addServerColumns(db) {
     let added = 0;
     for (const [colName, colDef] of Object.entries(newCols)) {
       if (!existingCols.includes(colName)) {
-        await db.prepare(`ALTER TABLE servers ADD COLUMN ${colName} ${colDef}`).run();
+        const colSqlName = colName === 'interface' ? '"interface"' : colName;
+        await db.prepare(`ALTER TABLE servers ADD COLUMN ${colSqlName} ${colDef}`).run();
         added++;
       }
     }
+
+    let migratedPrices = 0;
+    if (shouldMigrateLegacyPrice) {
+      const { results: servers = [] } = await db.prepare(
+        `SELECT id, price FROM servers`
+      ).all();
+
+      for (const server of servers) {
+        const normalizedPrice = normalizePrice(server.price);
+        const billingCycle = normalizeBillingCycle(detectBillingCycle(server.price));
+        const currency = normalizeCurrency(detectCurrencySymbol(server.price) || '¥');
+
+        await db.prepare(
+          `UPDATE servers SET price = ?, billing_cycle = ?, currency = ? WHERE id = ?`
+        ).bind(normalizedPrice, billingCycle, currency, server.id).run();
+        migratedPrices++;
+      }
+    }
     
-    return { success: true, added };
+    return { success: true, added, migratedPrices };
   } catch (e) {
     debug('添加 servers 表列失败:', e);
     return { success: false, error: e.message };
@@ -174,40 +209,30 @@ async function cleanupServerExtraColumns(db) {
 
 export async function addHistoryColumns(db) {
   try {
-    const { results: historyColumns } = await db.prepare(`PRAGMA table_info(metrics_history)`).all();
-    const existingHistoryCols = historyColumns.map(c => c.name);
-    
-    const newHistoryCols = {
-      cpu_cores: "INTEGER DEFAULT 0",
-      cpu_info: "TEXT DEFAULT ''",
-      agent_version: "TEXT DEFAULT ''",
-      gpu: "REAL DEFAULT NULL",
-      gpu_info: "TEXT DEFAULT ''",
-      arch: "TEXT DEFAULT ''",
-      os: "TEXT DEFAULT ''",
-      region: "TEXT DEFAULT ''",
-      ip_v4: "TEXT DEFAULT '0'",
-      ip_v6: "TEXT DEFAULT '0'",
-      boot_time: "TEXT DEFAULT ''",
-      net_rx_monthly: "REAL DEFAULT 0",
-      net_tx_monthly: "REAL DEFAULT 0",
-      loss_ct: "INTEGER DEFAULT NULL",
-      loss_cu: "INTEGER DEFAULT NULL",
-      loss_cm: "INTEGER DEFAULT NULL",
-      loss_bd: "INTEGER DEFAULT NULL"
-    };
-    
+    const newHistoryCols = HISTORY_UPGRADE_COLUMNS;
+
+    const tables = ['metrics_history'];
+    const oldTable = await db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
+    ).first();
+    if (oldTable) tables.push('metrics_history_old');
+
     let added = 0;
-    for (const [colName, colDef] of Object.entries(newHistoryCols)) {
-      if (!existingHistoryCols.includes(colName)) {
-        await db.prepare(`ALTER TABLE metrics_history ADD COLUMN ${colName} ${colDef}`).run();
-        added++;
+    for (const tableName of tables) {
+      const { results: historyColumns } = await db.prepare(`PRAGMA table_info(${tableName})`).all();
+      const existingHistoryCols = historyColumns.map(c => c.name);
+
+      for (const [colName, colDef] of Object.entries(newHistoryCols)) {
+        if (!existingHistoryCols.includes(colName)) {
+          await db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`).run();
+          added++;
+        }
       }
     }
-    
+
     return { success: true, added };
   } catch (e) {
-    debug('添加 metrics_history 表列失败:', e);
+    debug('Failed to add metrics_history columns:', e);
     return { success: false, error: e.message };
   }
 }
@@ -250,6 +275,7 @@ export async function cleanupStaleSettings(db) {
       'custom_head',
       'custom_script',
       'custom_bg',
+      'favicon',
       'is_public',
       'show_price',
       'show_expire',

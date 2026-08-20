@@ -1,4 +1,5 @@
 export const DEFAULT_SITE_TITLE = 'Cloudflare Server Monitor'
+export const FRONTEND_WS_TIMEOUT_MINUTES_MAX = 1440
 
 export const TIME = {
   ONLINE_THRESHOLD_MS: 300000,
@@ -16,9 +17,15 @@ export const CHART = {
   MAX_TICKS_HOUR: 12
 }
 
+export const HISTORY = {
+  LONG_RANGE_POINT_OPTIONS: [60, 120, 180, 240],
+  DEFAULT_LONG_RANGE_POINTS: 120
+}
+
 export const PING = {
-  GOOD_THRESHOLD: 100,
-  WARNING_THRESHOLD: 200
+  GOOD_THRESHOLD: 80,
+  WARNING_THRESHOLD: 160,
+  CRITICAL_THRESHOLD: 240
 }
 
 export const STORAGE = {
@@ -46,6 +53,7 @@ export const COLORS = {
 export default {
   TIME,
   CHART,
+  HISTORY,
   PING,
   STORAGE,
   STATUS,

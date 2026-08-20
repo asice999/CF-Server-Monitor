@@ -1,10 +1,10 @@
-# CF-Server-Monitor 前端主题开发文档
+# CF-Server-Monitor 第三方主题开发 API 文档
 
-> 面向 CF-Server-Monitor 前端主题开发的 API 参考。
+> 面向第三方主题开发作者的 API 参考。
 >
-> 本文档仅保留浏览器端调用的接口，去除后端内部实现细节。
+> 本文档只保留第三方主题可用的公开 API、WebSocket 和静态目录约定，不介绍后台管理接口。
 >
-> 如果仅需制作主题，无需关注管理端 API，直接跳转到 `/#/admin` 即可。
+> 管理后台固定由默认主题接管；主题中的管理入口只能跳转到 `/admin#admin`。
 
 **Base URL**：`https://<your-worker-domain>`
 
@@ -16,7 +16,7 @@
 
 ## 目录
 
-- [0. 运行时配置与版本升级提示](#0-运行时配置与版本升级提示)
+- [0. 运行时配置、构建产物与版本升级提示](#0-运行时配置构建产物与版本升级提示)
 - [1. 鉴权与 Turnstile 流程](#1-鉴权与-turnstile-流程)
 - **[2. 公开 API](#2-公开-api)**
   - **[2.1 获取站点配置](#21-获取站点配置)**
@@ -29,7 +29,7 @@
 
 ***
 
-## 0. 运行时配置与版本升级提示
+## 0. 运行时配置、构建产物与版本升级提示
 
 ### 0.1 API Base 配置
 
@@ -69,16 +69,51 @@ https://localhost:5173,https://[你的github用户名].github.io
 npm run build:github-page
 ```
 
-`csp_api` 和 `csp_static` 不会从 `/api/config` 暴露给前端。Worker/Pages 部署时它们由后台外观设置保存，并在服务端返回 HTML 时注入 CSP；纯静态构建时使用上面的 `CSP_API` / `CSP_STATIC` 环境变量注入。
+纯静态构建时，`API_BASE`、`TITLE`、`BACKGROUND_IMAGE`、`CSP_API`、`CSP_STATIC` 会写入 HTML 运行时配置。后台外观设置中的 `csp_api` 和 `csp_static` 也会影响页面允许加载的第三方 API 和静态资源域名。
 
-### 0.2 版本升级提示
+### 0.2 主题构建产物约定
+
+主题完成后提交到 [huilang-me/CFSM-Theme-Store](https://github.com/huilang-me/CFSM-Theme-Store) 项目。
+
+主题构建产物仅需要：
+
+- `index.html`
+- `assets/` 目录
+
+目录结构示例：
+
+```
+my-theme/
+├── index.html
+└── assets/
+    ├── app.css
+    ├── app.js
+    └── logo.webp
+```
+
+主题开发注意事项：
+
+- 主题提交目录只能生成 `index.html` 和 `assets/`；不要依赖其他主题目录或根目录文件
+- 静态资源应放在主题目录的 `assets/` 下，并在 HTML/JS/CSS 中使用 `/assets/...` 或相对 `assets/...`
+- 旗帜和 OS 图标走默认皮肤静态文件，不要打包进主题：旗帜使用 `/flags/<code>.svg`，OS 图标使用 `/os-icons/<filename>`
+- 站点标题、背景图、自定义 `<head>`、自定义脚本由用户后台外观设置控制，主题不要把这些配置写死
+- 主题不可用时应让页面暴露加载错误，不要在主题内静默跳转到其他页面
+- 主题底部需要展示 `Powered by CF-Server-Monitor`，并链接到 [https://github.com/huilang-me/CF-Server-Monitor/](https://github.com/huilang-me/CF-Server-Monitor/)；建议同时输出 `/api/config` 返回的 `version`，例如 `Powered by CF-Server-Monitor v2.7.12 Beta`
+
+路由约定：
+
+- 首页：`/#/` 或 `/#`
+- 详情页：`/#/server/:id`
+- 管理后台：链接到 `/admin#admin`，由内置默认主题接管，第三方主题不得实现管理页
+
+### 0.3 版本升级提示
 
 `GET /api/config` 会返回当前 Workers 版本 `version`。当请求带有有效 JWT 时，后端还会查询远程最新版并额外返回：
 
 - `last_workers_version`：最新 Workers 版本
 - `last_agent_version`：最新探针 Agent 版本
 
-内置主题会将 `version` 与 `last_workers_version` 做字符串比较；两者不一致时，页脚版本号旁显示升级提示圆点和 tooltip。`last_agent_version` 用于管理端服务器表格中的 Agent 版本对比，落后版本会以红色显示。
+第三方主题可以将 `version` 与 `last_workers_version` 做字符串比较，自行决定是否展示 Workers 升级提示。`last_agent_version` 仅在登录后返回，可用于可选的 Agent 版本提示。
 
 未登录访问 `/api/config` 时不会返回 `last_workers_version` / `last_agent_version`，自定义主题不要依赖匿名请求展示升级提示。
 
@@ -88,12 +123,15 @@ npm run build:github-page
 
 ### 1.1 鉴权机制
 
-项目使用两套鉴权机制：
+项目使用以下鉴权机制：
 
 | 机制         | 使用位置            | 方式                                           |
 | ---------- | --------------- | -------------------------------------------- |
-| JWT Bearer | 管理端 API、非公开站点访问 | `Authorization: Bearer <token>`              |
+| JWT Bearer | 非公开站点读取公开 API、查看 1 小时以上历史 | `Authorization: Bearer <token>`              |
+| WebSocket JWT | 非公开站点连接 `/api/ws` | `Authorization: Bearer <token>`、`Cookie: cfsm_auth=<token>` 或查询参数 `token` / `auth_token` / `ws_token` |
 | Turnstile  | 公开 API（当启用时）    | `X-Turnstile-Token` 或 `X-Turnstile-Verified` |
+
+浏览器原生 WebSocket 不能自定义 `Authorization` Header。第三方主题在私有站点中连接 `/api/ws` 时，同域走登录后的 `cfsm_auth` Cookie，跨域走 WebSocket URL 查询参数 `token=<jwt>`。查询参数 token 可能出现在访问日志中，请只通过 HTTPS 使用。
 
 ### 1.2 Turnstile 人机验证流程
 
@@ -116,7 +154,8 @@ npm run build:github-page
 
 - `/api/ws`、`/api/config`（不带 Turnstile Header 时）无需验证
 - `/api/config` 带 `X-Turnstile-Token` 或 `X-Turnstile-Verified` 时会进入验证流程，并通过 `verified` / `turnstile_verified` 返回验证结果
-- `turnstile_enabled` 是全局 API 验证开关，`turnstile_login_enabled` 是登录页验证开关；`/api/config` 返回的 `turnstile_login_enabled` 在全局验证开启时也会为 `true`
+- `/api/ws` 不参与 Turnstile 验证，但非公开站点仍需要通过 WebSocket JWT 认证
+- `turnstile_enabled` 是全局 API 验证开关，`turnstile_login_enabled` 是内置后台登录页验证开关；第三方主题不实现登录页，管理入口跳转 `/admin#admin`
 
 ***
 
@@ -140,16 +179,21 @@ Headers: (可选) Authorization: Bearer <jwt>, X-Turnstile-Token / X-Turnstile-V
 {
   "version": "2.7.12 Beta",
   "last_workers_version": "2.7.13",
-  "last_agent_version": "1.3.2",
+  "last_agent_version": "1.3.3",
   "is_public": true,
   "authorization": true,
   "turnstile_enabled": true,
   "turnstile_login_enabled": true,
   "turnstile_site_key": "1x00000000000000000000AA",
   "site_title": "My Server Monitor",
+  "theme_options": {
+    "a": 1,
+    "b": 2
+  },
   "verified": false,
   "turnstile_verified": null,
-  "show_long_history": true
+  "frontend_ws_timeout_minutes": 20,
+  "long_history_points": 120
 }
 ```
 
@@ -166,11 +210,13 @@ Headers: (可选) Authorization: Bearer <jwt>, X-Turnstile-Token / X-Turnstile-V
 | `turnstile_login_enabled` | boolean | 是否启用登录页人机验证 |
 | `turnstile_site_key` | string       | Turnstile 前端公钥  |
 | `site_title`         | string       | 站点标题 |
+| `theme_options`      | object       | 第三方主题自定义配置；未配置时为空对象 |
 | `verified`           | boolean      | 当前请求是否已验证       |
 | `turnstile_verified` | string\|null | 已验证凭证，缓存复用 1 小时 |
-| `show_long_history`  | boolean      | 是否允许查看超过 1 小时历史 |
+| `frontend_ws_timeout_minutes` | number | 前端实时订阅连接超时分钟数，范围 `0`-`1440`；默认 `0` 表示不超时 |
+| `long_history_points` | number      | 长历史查询返回的采样点数，可选 `60`、`120`、`180`、`240` |
 
-`/api/config` 不返回 `csp_api` / `csp_static`。CSP 白名单属于 HTML 生成阶段配置，不是前端运行时配置。
+`theme_options` 对第三方主题是只读运行时配置。需要修改主题配置时，跳转到内置后台 `/admin#admin`，不要在第三方主题内调用管理端接口。
 
 **示例**：
 
@@ -208,8 +254,7 @@ Headers: (按需) Authorization: Bearer <jwt>, X-Turnstile-Token/Verified
   "sysConfig": {
     "show_price": true,
     "show_expire": true,
-    "show_tf": true,
-    "show_time": true
+    "show_tf": true
   }
 }
 ```
@@ -221,7 +266,9 @@ Headers: (按需) Authorization: Bearer <jwt>, X-Turnstile-Token/Verified
 | `servers`     | 服务器列表（含最新指标），未登录用户自动过滤隐藏服务器；`tags` 始终随服务器返回 |
 | `stats`       | 聚合统计（在线阈值 5 分钟）             |
 | `regionStats` | 按区域统计服务器数量                  |
-| `sysConfig`   | 站点开关配置，控制 UI 显示             |
+| `sysConfig`   | 站点开关配置，控制 UI 显示；主题配置请从 `/api/config` 的 `theme_options` 读取 |
+
+`servers[].ping` / `servers[].loss` 仅在列表接口返回，均为固定 30 个点的 1 小时延迟/丢包窗口数组，点格式为 `{ ts, ct, cu, cm, bd }`。
 
 **示例**：
 
@@ -251,12 +298,16 @@ Headers: (按需) Authorization, X-Turnstile-Token/Verified
   "name": "HK-01",
   "server_group": "HK",
   "tags": "prod,edge",
-  "price": "￥30/月",
+  "price": "30.00",
+  "billing_cycle": "month",
+  "auto_renewal": "0",
+  "currency": "¥",
   "expire_date": "2026-12-31",
   "traffic_limit": "1TB",
   "traffic_calc_type": "total",
   "reset_day": 1,
   "report_interval": 60,
+  "wss_report_interval": 2,
   "is_hidden": "0",
   "sort_order": 0,
   "cpu": 12.34,
@@ -275,19 +326,51 @@ Headers: (按需) Authorization, X-Turnstile-Token/Verified
   "ram_total": 8192, "ram_used": 3700,
   "swap_total": 2048, "swap_used": 100,
   "disk_total": 102400, "disk_used": 32000,
+  "disk": {
+    "read_bps": 4096,
+    "write_bps": 2048,
+    "read_iops": 12,
+    "write_iops": 8,
+    "await_ms": 1.5,
+    "util": 3.2
+  },
   "cpu_cores": 4, "cpu_info": "Intel Xeon",
-  "gpu": 12.5, "gpu_info": "NVIDIA RTX 3060",
+  "gpu_info": "[{\"id\":\"0\",\"name\":\"NVIDIA RTX 3060\",\"info\":12.5}]",
   "arch": "x86_64", "os": "Ubuntu 22.04",
+  "kernel_version": "6.8.0-36-generic",
   "region": "HK",
   "ip_v4": "1", "ip_v6": "1",
   "boot_time": "1700000000000",
   "last_updated": 1737638400000,
   "timestamp": 1737638400000,
-  "sysConfig": { "show_long_history": true }
+  "latestReportUpdates": [
+    {
+      "serverId": "9b2c...",
+      "reportTs": 1737638405000,
+      "reportAgeMs": 1200,
+      "samples": [
+        {
+          "ts": 1737638400000,
+          "data": {
+            "cpu": 12.34,
+            "ram_total": 8192,
+            "ram_used": 3700,
+            "swap_total": 1024,
+            "swap_used": 64,
+            "net_in_speed": 1024,
+            "net_out_speed": 512
+          }
+        }
+      ]
+    }
+  ],
+  "sysConfig": { "long_history_points": 120 }
 }
 ```
 
-`tags` 为英文逗号分隔字符串。`note` 属于管理端内部字段，不从 dashboard 公共接口返回。
+`tags` 为英文逗号分隔字符串。`note` 属于管理端内部字段，不从 dashboard 公共接口返回。`disk` 为可选磁盘 IO 指标对象：`read_bps` / `write_bps` 单位为 B/s，`read_iops` / `write_iops` 为 IOPS，`await_ms` 为毫秒，`util` 为百分比；旧探针、旧数据缺失，或者 6 个子字段全为 0 时，API / WebSocket 不返回该对象，主题不应展示依赖磁盘 IO 的图表。`latestReportUpdates` 与 `/api/servers` 同名字段形状一致，REST 样本统一为 `{ ts, data }` 并按探针批量采样包透传；内置探针默认只在普通采样点上报 `cpu`、`ram_total`、`ram_used`、`swap_total`、`swap_used`、`net_in_speed`、`net_out_speed`，每次报告最后一个样本可能额外携带 `disk` 等报告级字段；回放状态保留约 5 分钟，允许为空数组。`gpu` 已废弃，主题应使用 `gpu_info`；新版上报和 WebSocket 实时数据为 `[{ id, name, info }]` 数组，历史/详情 REST 响应中可能是同结构的 JSON 字符串。
+
+`ping` / `loss` 窗口数组仅在 `/api/servers` 的 `servers[]` 中返回，`/api/server` 详情接口不返回新增窗口数组。窗口固定 30 个点，覆盖约 1 小时，每 2 分钟一个槽位；点格式为 `{ ts, ct, cu, cm, bd }`，其中 `ct` / `cu` / `cm` / `bd` 分别对应不同探测线路。实际采样不足 30 个槽位时，后端会用时间最近的已有点补齐；若 DO/Worker 缓存窗口最后一点落后当前最新指标超过 2 分钟，后端会用本次响应已查询到的最新指标追加一组点，不增加额外查询。DO 延迟窗口在当前 Worker isolate 内短缓存约 2 分钟，缓存不跨 isolate 共享。
 
 **失败返回**：
 
@@ -321,15 +404,50 @@ Headers: (按需) Authorization, X-Turnstile-Token/Verified
 
 ```json
 [
-  { "timestamp": 1737600000000, "cpu": 12.3, "gpu": null, "ram_used": 3700 },
-  { "timestamp": 1737600600000, "cpu": 13.1, "gpu": null, "ram_used": 3712 }
+  {
+    "timestamp": 1737600000000,
+    "cpu": 12.3,
+    "gpu_info": "[{\"id\":\"0\",\"name\":\"NVIDIA RTX 3060\",\"info\":12.5}]",
+    "ram_used": 3700,
+    "disk_read_bps": 4096,
+    "disk_write_bps": 2048,
+    "disk_read_iops": 12,
+    "disk_write_iops": 8,
+    "disk_await_ms": 1.5,
+    "disk_util": 3.2,
+    "disk": {
+      "read_bps": 4096,
+      "write_bps": 2048,
+      "read_iops": 12,
+      "write_iops": 8,
+      "await_ms": 1.5,
+      "util": 3.2
+    },
+    "kernel_version": "6.8.0-36-generic"
+  },
+  {
+    "timestamp": 1737600600000,
+    "cpu": 13.1,
+    "gpu_info": "[{\"id\":\"0\",\"name\":\"NVIDIA RTX 3060\",\"info\":13.0}]",
+    "ram_used": 3712,
+    "disk": {
+      "read_bps": 5120,
+      "write_bps": 1024,
+      "read_iops": 15,
+      "write_iops": 4,
+      "await_ms": 1.2,
+      "util": 2.8
+    },
+    "kernel_version": "6.8.0-36-generic"
+  }
 ]
 ```
 
 **注意**：
 
-- 未登录用户 `hours > 1` 时返回 `401`
-- 服务端最多返回约 160 个采样点，会按查询时长自动降采样
+- 未登录用户 `hours > 24` 时返回 `401`
+- 服务端按后台 `long_history_points` 配置返回采样点，默认 120 个点
+- 历史行有磁盘 IO 数据时会返回 `disk` 对象；为兼容历史存储，也可能同时包含 `disk_read_bps`、`disk_write_bps`、`disk_read_iops`、`disk_write_iops`、`disk_await_ms`、`disk_util` 平铺字段。主题只需要读取 `disk`；缺失时不应展示磁盘 IO 图表
 - 数据库字段缺失且需要升级时可能返回 `409 { "message": "databaseUpgradeRequired" }`
 
 **示例**：
@@ -355,6 +473,13 @@ Headers: Upgrade: websocket, Connection: Upgrade
 | 参数 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `subscribe` | 否 | `all` | `all` 订阅所有服务器，`<serverId>` 只订阅指定服务器 |
+| `token` / `auth_token` / `ws_token` | 否 | - | 非公开站点可用的 JWT 查询参数认证；公开站点不需要 |
+
+**鉴权**：
+
+- 公开站点：无需 JWT。
+- 非公开站点：连接 `/api/ws` 必须通过 WebSocket JWT 认证，支持 `Authorization: Bearer <jwt>`、`Cookie: cfsm_auth=<jwt>`、查询参数 `token` / `auth_token` / `ws_token`。
+- 浏览器主题通常不能设置 WebSocket `Authorization` Header；同域部署使用 `cfsm_auth` Cookie，跨域或纯静态主题在 WebSocket URL 上追加 `token=<jwt>`。
 
 **过滤机制**：
 
@@ -369,12 +494,29 @@ Headers: Upgrade: websocket, Connection: Upgrade
 
 当配置了多个 `apiBase` 时，前端会为每个 apiBase 创建独立的 WebSocket 连接。每个连接发送的 `ids` 应只包含该 apiBase 返回的服务器 ID，而非全部服务器 ID。每个 Worker/DO 只知道自己的服务器，传入不属于它的 ID 不会产生任何效果。
 
-**推荐流程**：
+**推荐流程（首页/列表页）**：
 
 1. 调用 `GET /api/servers` 获取服务器列表（已按登录状态过滤隐藏服务器）
 2. 提取返回的 `servers[].id` 数组
 3. 连接 WebSocket：`?subscribe=all`
 4. 建连后通过 WebSocket 通道发送 `{ type: "subscribe", scope: "all", ids }`
+
+**推荐流程（详情页）**：
+
+详情页只展示单台服务器时，应使用单服务器接口和单服务器 WebSocket 订阅，以降低后端推送量、前端渲染压力和额度消耗：
+
+- HTTP 初始数据：`GET https://example.com/api/server?id=<id>`
+- WebSocket 实时订阅：`wss://example.com/api/ws?subscribe=<id>`
+
+非公开站点同域部署时直接使用 Cookie 认证；跨域或纯静态主题无法依赖同域 Cookie 时，再使用查询参数认证：`wss://example.com/api/ws?subscribe=<id>&token=<jwt>`。
+
+详情页不要使用 `GET https://example.com/api/servers` 拉全量列表，也不要使用 `wss://example.com/api/ws?subscribe=all` 订阅全量更新后再在前端过滤。
+
+**页面可见性建议**：
+
+为实现前端展示效果并节省额度消耗，主题应监听 `document.visibilitychange`，页面进入后台或隐藏时主动关闭 WebSocket，页面重新可见时再按当前页面类型重新连接并恢复订阅。关闭连接后可保留最后一次数据用于静态展示；重新可见时建议先按当前页面补一次 REST 数据，再恢复 WebSocket 实时更新。
+
+主题还应读取 `/api/config` 的 `frontend_ws_timeout_minutes`。值为 `0` 时不按连接时长断开；值为正整数时，应在单次连接达到对应分钟数后主动关闭，并由用户明确选择是否继续连接。继续后应建立新连接并重新开始计时，不应在用户选择关闭后静默重连。
 
 **推送策略**：
 
@@ -392,7 +534,9 @@ Headers: Upgrade: websocket, Connection: Upgrade
 | `subscribed` | S → C | `{ type: "subscribed", ts: number, subscribed: string, count: number }` |
 | `ping` | C → S | `{ type: "ping", ts: number }` |
 | `pong` | 双向 | `{ type: "pong", ts: number }` |
-| `batchUpdate` | S → C | `{ type: "batchUpdate", ts: number, updates: Array<{serverId, samples: Array<{ts, data}>}> }` |
+| `batchUpdate` | S → C | `{ type: "batchUpdate", ts: number, updates: Array<{serverId, samples: Array<{ts, data?: Partial<Server>, payload?: Partial<Server>, metrics?: Partial<Server>}>}> }` |
+
+`batchUpdate.samples[]` 的指标对象可能出现在 `data`、`payload` 或 `metrics` 中，主题应按 `sample.data || sample.payload || sample.metrics` 读取。该对象是增量字段：批次内的高频采样点主要包含 CPU、内存、Swap、网速和时间字段；每次上报的最后一个样本会额外携带本次完整报告状态，用于同步磁盘容量、磁盘 IO、GPU、进程、连接数、探针、Ping/丢包等报告级数据。`disk` 缺失、格式无效或所有子字段全为 0 时，WebSocket 样本不会携带 `disk`。
 
 **示例（subscribe=all，带 ID 过滤）**：
 
@@ -402,7 +546,14 @@ const { servers } = await (await fetch('/api/servers')).json();
 const ids = servers.map(s => s.id);
 
 // 2. 连接 WebSocket，并通过通道消息提交订阅 ID 列表
-const ws = new WebSocket('wss://status.example.com/api/ws?subscribe=all');
+const url = new URL('wss://status.example.com/api/ws');
+url.searchParams.set('subscribe', 'all');
+const sameHost = url.host === location.host;
+if (!sameHost) {
+  const token = localStorage.getItem('jwt_token');
+  if (token) url.searchParams.set('token', token);
+}
+const ws = new WebSocket(url.toString());
 ws.onopen = () => {
   ws.send(JSON.stringify({ type: 'subscribe', scope: 'all', ids }));
 };
@@ -411,7 +562,7 @@ ws.onmessage = (ev) => {
   if (msg.type === 'batchUpdate') {
     for (const u of msg.updates) {
       for (const s of u.samples || []) {
-        updateServer(u.serverId, s.data);
+        updateServer(u.serverId, s.data || s.payload || s.metrics || {});
       }
     }
   }
@@ -421,13 +572,20 @@ ws.onmessage = (ev) => {
 **示例（subscribe=serverId，实时推送）**：
 
 ```js
-const ws = new WebSocket('wss://status.example.com/api/ws?subscribe=server-001');
+const url = new URL('wss://status.example.com/api/ws');
+url.searchParams.set('subscribe', 'server-001');
+const sameHost = url.host === location.host;
+if (!sameHost) {
+  const token = localStorage.getItem('jwt_token');
+  if (token) url.searchParams.set('token', token);
+}
+const ws = new WebSocket(url.toString());
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.type === 'batchUpdate') {
     for (const u of msg.updates) {
       for (const s of u.samples) {
-        updateServer(u.serverId, s.data);
+        updateServer(u.serverId, s.data || s.payload || s.metrics || {});
       }
     }
   }
@@ -467,17 +625,38 @@ ws.onmessage = (ev) => {
 ## 5. 类型定义
 
 ```typescript
+interface DiskIoMetrics {
+  read_bps: number;   // B/s
+  write_bps: number;  // B/s
+  read_iops: number;
+  write_iops: number;
+  await_ms: number;
+  util: number;       // %
+}
+
+interface LatencyWindowPoint {
+  ts: number;
+  ct?: number | null | false;
+  cu?: number | null | false;
+  cm?: number | null | false;
+  bd?: number | null | false;
+}
+
 interface Server {
   id: string;
   name: string;
   server_group: string;
   tags: string;
-  price: string;
+  price: string; // "0" 或 "-1" 表示免费，空白表示未设置
+  billing_cycle: string;
+  auto_renewal: string;
+  currency: string;
   expire_date: string;
   traffic_limit: string;
   traffic_calc_type: string;
   reset_day: number;
   report_interval: number;
+  wss_report_interval: number;
   is_hidden: '0' | '1';
   sort_order: number;
   cpu: number;
@@ -491,29 +670,32 @@ interface Server {
   processes: number;
   tcp_conn: number;
   udp_conn: number;
-  ping_ct: number | null;
-  ping_cu: number | null;
-  ping_cm: number | null;
-  ping_bd: number | null;
-  loss_ct: number | null;
-  loss_cu: number | null;
-  loss_cm: number | null;
-  loss_bd: number | null;
+  ping_ct: number | null | false;
+  ping_cu: number | null | false;
+  ping_cm: number | null | false;
+  ping_bd: number | null | false;
+  loss_ct: number | null | false;
+  loss_cu: number | null | false;
+  loss_cm: number | null | false;
+  loss_bd: number | null | false;
+  ping?: LatencyWindowPoint[]; // 仅 /api/servers 的列表项返回
+  loss?: LatencyWindowPoint[]; // 仅 /api/servers 的列表项返回
   ram_total: number;
   ram_used: number;
   swap_total: number;
   swap_used: number;
   disk_total: number;
   disk_used: number;
+  disk?: DiskIoMetrics; // 磁盘 IO；旧数据可能缺失
   cpu_cores: number;
   cpu_info: string;
-  gpu: number | null;
-  gpu_info: string;
+  gpu_info: Array<{ id: string; name: string; info: number | null }> | string;
   arch: string;
   os: string;
+  kernel_version: string;
   region: string;
-  ip_v4: '0' | '1';
-  ip_v6: '0' | '1';
+  ip_v4: '0' | '1'; // 公共 REST 接口仅返回 IPv4 可达性
+  ip_v6: '0' | '1'; // 公共 REST 接口仅返回 IPv6 可达性
   boot_time: string;
   agent_version?: string;
   last_updated: number;
@@ -522,12 +704,22 @@ interface Server {
   sysConfig?: SysConfig;
 }
 
+interface HistoryMetricRow extends Partial<Server> {
+  timestamp: number;
+  disk_read_bps?: number;
+  disk_write_bps?: number;
+  disk_read_iops?: number;
+  disk_write_iops?: number;
+  disk_await_ms?: number;
+  disk_util?: number;
+  disk?: DiskIoMetrics;
+}
+
 interface SysConfig {
   show_price?: boolean;
   show_expire?: boolean;
   show_tf?: boolean;
-  show_time?: boolean;
-  show_long_history?: boolean;
+  long_history_points?: number;
 }
 
 interface SiteConfig {
@@ -540,41 +732,11 @@ interface SiteConfig {
   turnstile_login_enabled: boolean;
   turnstile_site_key: string;
   site_title: string;
+  theme_options: Record<string, unknown>;
   verified: boolean;
   turnstile_verified: string | null;
-  show_long_history: boolean;
-}
-
-interface Settings {
-  site_title: string;
-  custom_bg: string;
-  custom_head: string;
-  custom_script: string;
-  csp_static: string;
-  csp_api: string;
-  is_public: 'true' | 'false';
-  show_price: 'true' | 'false';
-  show_expire: 'true' | 'false';
-  show_tf: 'true' | 'false';
-  show_time: 'true' | 'false';
-  show_long_history: 'true' | 'false';
-  tg_notify: 'true' | 'false';
-  tg_bot_token: string;
-  tg_chat_id: string;
-  turnstile_enabled: 'true' | 'false';
-  turnstile_login_enabled: 'true' | 'false';
-  turnstile_site_key: string;
-  turnstile_secret_key: string;
-  jwt_secret: string;
-  username: string;
-  password: string;
-  cloudflare_account_id: string;
-  cloudflare_token: string;
-  custom_ct: string;
-  custom_cu: string;
-  custom_cm: string;
-  custom_bd: string;
-  expire_reminder: 'true' | 'false';
+  frontend_ws_timeout_minutes: number;
+  long_history_points: number;
 }
 
 interface WsMessage {
@@ -587,7 +749,12 @@ interface WsMessage {
   serverId?: string;
   updates?: Array<{
     serverId: string;
-    samples: Array<{ ts: number; data: Server }>;
+    samples: Array<{
+      ts: number;
+      data?: Partial<Server>;
+      payload?: Partial<Server>;
+      metrics?: Partial<Server>;
+    }>;
   }>;
 }
 ```

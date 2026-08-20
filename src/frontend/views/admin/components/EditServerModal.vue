@@ -1,6 +1,6 @@
 <template>
   <div id="editModal" class="modal-overlay" :class="{ active: show }">
-    <div class="modal-dialog">
+    <div class="modal-dialog edit-server-modal">
       <div class="modal-header">
         <div class="modal-title">{{ currentServerName }}</div>
         <button class="modal-close" @click="$emit('close')">✕</button>
@@ -17,10 +17,17 @@
           <label class="form-label">{{ trans.groupName }}</label>
           <input type="text" name="edit_server_group" autocomplete="off" v-model="editForm.server_group" class="form-input" placeholder="e.g. US VPS">
         </div>
+      </div>
 
+      <div class="form-row">
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.tags }}</label>
           <input type="text" name="edit_tags" autocomplete="off" v-model="editForm.tags" class="form-input" :placeholder="trans.tagsPlaceholder">
+        </div>
+
+        <div class="form-group flex-1">
+          <label class="form-label">{{ trans.region }} CN/US/GB</label>
+          <input type="text" name="edit_region" autocomplete="off" v-model.trim="editForm.region" class="form-input" :placeholder="trans.regionPlaceholder">
         </div>
       </div>
 
@@ -29,20 +36,39 @@
         <textarea name="edit_note" autocomplete="off" v-model="editForm.note" class="form-textarea" rows="2" :placeholder="trans.notePlaceholder"></textarea>
       </div>
 
-      <div class="form-row">
+      <div class="form-row mobile-two-row">
         <div class="form-group flex-1">
-          <label class="form-label">{{ trans.price }}</label>
-          <input type="text" name="edit_price" autocomplete="off" v-model="editForm.price" class="form-input" placeholder="e.g. $40/Y">
+          <label class="form-label">{{ trans.currency }}</label>
+          <input type="text" v-model="editForm.currency" class="form-input" list="currency-list" placeholder="e.g. $, ¥, €">
+          <datalist id="currency-list">
+            <option v-for="item in currencyOptions" :key="item.symbol" :value="item.symbol">{{ currencyLabel(item) }}</option>
+          </datalist>
         </div>
 
         <div class="form-group flex-1">
-          <label class="form-label">{{ trans.expirationDate }}</label>
-          <input type="date" name="edit_expire_date" autocomplete="off" v-model="editForm.expire_date" class="form-input">
+          <label class="form-label">{{ trans.price }}</label>
+          <input type="text" name="edit_price" autocomplete="off" inputmode="decimal" v-model="editForm.price" class="form-input" placeholder="40.00" @blur="normalizePriceInput">
+        </div>
+
+        <div class="form-group flex-1">
+          <label class="form-label">{{ trans.billingCycle }}</label>
+          <select v-model="editForm.billing_cycle" class="form-select">
+            <option v-for="item in billingCycleOptions" :key="item.value" :value="item.value">{{ cycleLabel(item) }}</option>
+          </select>
+        </div>
+
+        <div class="form-group flex-1">
+          <label class="form-label">{{ trans.autoRenewal }}</label>
+          <div class="checkbox-item no-margin">
+            <input type="checkbox" v-model="editForm.auto_renewal">
+            <label>
+              <b>{{ trans.enabled }}</b>
+            </label>
+          </div>
         </div>
       </div>
 
-
-      <div class="form-row">
+      <div class="form-row mobile-two-row">
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.trafficLimit }} (GB)</label>
           <input type="number" name="edit_traffic_limit" autocomplete="off" v-model="editForm.traffic_limit" class="form-input" placeholder="e.g. 1000" min="0" step="1">
@@ -53,10 +79,18 @@
             <option value="total">{{ trans.trafficCalcTotal }}</option>
             <option value="ul">{{ trans.trafficCalcUl }}</option>
             <option value="dl">{{ trans.trafficCalcDl }}</option>
+            <option value="max">{{ trans.trafficCalcMax }}</option>
           </select>
         </div>
         <div class="form-group flex-1">
-          <label class="form-label">{{ trans.trafficResetDay }}</label>
+          <label class="form-label">{{ trans.expirationDate }}</label>
+          <input type="date" name="edit_expire_date" autocomplete="off" v-model="editForm.expire_date" class="form-input" @click="openDatePicker">
+        </div>
+        <div class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.trafficResetDay }}
+            <HelpTooltip :text="trans.trafficResetDayTip" />
+          </label>
           <select ref="editResetDayRef" name="edit_reset_day" v-model="editForm.reset_day" class="form-select">
             <option :value="0">0</option>
             <option v-for="day in 31" :key="day" :value="day">{{ day }}</option>
@@ -66,7 +100,10 @@
 
       <div class="form-row">
         <div class="form-group flex-1">
-          <label class="form-label">{{ trans.collectInterval }}</label>
+          <label class="form-label">
+            {{ trans.collectInterval }}
+            <HelpTooltip :text="trans.collectIntervalHint" />
+          </label>
           <select v-model="editForm.collect_interval" class="form-select">
             <option :value="0">0</option>
             <option :value="1">1</option>
@@ -84,11 +121,43 @@
             <option :value="180">180</option>
           </select>
         </div>
+        <div class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.connectionMode }}
+            <HelpTooltip v-if="!isWssReportEnabled" :text="trans.wssReportDisabledConnectionHint" />
+          </label>
+          <select v-model="editForm.connection_mode" class="form-select" :disabled="!isWssReportEnabled">
+            <option value="auto">{{ trans.connectionModeAuto }}</option>
+            <option value="http">{{ trans.connectionModeHttp }}</option>
+          </select>
+        </div>
+        <div v-if="isWssReportEnabled && editForm.connection_mode === 'auto'" class="form-group flex-1">
+          <label class="form-label">{{ trans.wssReportInterval }}</label>
+          <select v-model="editForm.wss_report_interval" class="form-select">
+            <option v-for="second in 5" :key="second" :value="second">{{ second }}</option>
+          </select>
+        </div>
       </div>
 
-      <div class="text-muted text-sm mb-3">
-        <span class="warning-icon">[i]</span> {{ trans.collectIntervalHint }}<br>
-        <span class="warning-icon">[i]</span> {{ trans.trafficResetDayTip }}
+      <div class="form-row">
+        <div class="form-group flex-1">
+          <label class="form-label">{{ trans.networkInterface }}</label>
+          <input type="text" name="edit_interface" autocomplete="off" v-model.trim="editForm.interface" class="form-input" :placeholder="trans.networkInterfacePlaceholder">
+        </div>
+        <div class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.rxCorrection }} (GB)
+            <HelpTooltip :text="trans.correctionHint" />
+          </label>
+          <input type="number" name="edit_rx_correction" autocomplete="off" v-model="editForm.rx_correction" class="form-input" placeholder="0" min="0" step="0.1">
+        </div>
+        <div class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.txCorrection }} (GB)
+            <HelpTooltip :text="trans.correctionHint" />
+          </label>
+          <input type="number" name="edit_tx_correction" autocomplete="off" v-model="editForm.tx_correction" class="form-input" placeholder="0" min="0" step="0.1">
+        </div>
       </div>
 
       <div class="form-row">
@@ -111,23 +180,9 @@
         </div>
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.customBd }} <span class="text-xs text-muted">({{ trans.serverLevel }})</span></label>
-          <input type="text" name="edit_custom_bd" autocomplete="off" v-model.trim="editForm.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" :placeholder="settings.custom_bd || 'lf3-ips.zstaticcdn.com'">
+          <input type="text" name="edit_custom_bd" autocomplete="off" v-model.trim="editForm.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" :placeholder="settings.custom_bd || 'ip.zstaticcdn.com'">
           <p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
         </div>
-      </div>
-
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.rxCorrection }} (GB)</label>
-          <input type="number" name="edit_rx_correction" autocomplete="off" v-model="editForm.rx_correction" class="form-input" placeholder="0" min="0" step="0.1">
-        </div>
-        <div class="form-group flex-1">
-          <label class="form-label">{{ trans.txCorrection }} (GB)</label>
-          <input type="number" name="edit_tx_correction" autocomplete="off" v-model="editForm.tx_correction" class="form-input" placeholder="0" min="0" step="0.1">
-        </div>
-      </div>
-      <div class="text-muted text-sm mb-3">
-        <span class="warning-icon">[i]</span> {{ trans.correctionHint }}
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -143,23 +198,20 @@
           <div class="checkbox-item no-margin">
             <input type="checkbox" v-model="editForm.is_hidden">
             <label>
-              <b>{{ trans.hideFromPublic }}</b><br>
-              <span class="text-xs text-muted">{{ trans.hideDesc }}</span>
+              <b>{{ trans.hideFromPublic }}</b>
             </label>
           </div>
         </div>
 
-        <div v-if="settings.tg_notify === 'true' && settings.tg_bot_token" class="form-group">
+        <div v-if="hasNodeNotificationOptions" class="form-group">
           <div class="checkbox-item no-margin">
             <input type="checkbox" v-model="editForm.offline_notify_disabled">
             <label>
-              <b>{{ trans.disableOfflineNotify }}</b><br>
-              <span class="text-xs text-muted">{{ trans.disableOfflineNotifyDesc }}</span>
+              <b>{{ trans.disableOfflineNotify }}</b>
             </label>
           </div>
         </div>
       </div>
-
       <div class="modal-footer flex-justify-between">
         <button @click="$emit('save')" class="btn btn-primary" :disabled="hasPingNodeErrors">{{ trans.save }}</button>
         <button @click="$emit('close')" class="btn">{{ trans.cancel }}</button>
@@ -169,8 +221,11 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
+import HelpTooltip from '../../../components/HelpTooltip.vue'
 import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'
+import { currentLang } from '../../../utils/i18n.js'
+import { BILLING_CYCLES, CURRENCY_OPTIONS, normalizePrice, renewExpireDateIfNeeded } from '../../../utils/server.js'
 
 const editForm = defineModel('editForm', { type: Object, required: true })
 
@@ -193,6 +248,70 @@ const pingNodeErrors = computed(() => Object.fromEntries(
 ))
 
 const hasPingNodeErrors = computed(() => Object.values(pingNodeErrors.value).some(Boolean))
+
+const billingCycleOptions = BILLING_CYCLES
+const currencyOptions = CURRENCY_OPTIONS
+
+const cycleLabel = (item) => currentLang.value === 'zh' ? item.labelZh : item.labelEn
+const currencyLabel = (item) => currentLang.value === 'zh'
+  ? `${item.symbol} ${item.nameZh}`
+  : `${item.symbol} ${item.nameEn}`
+
+const normalizeTgNotifySetting = (value) => {
+  if (value === true || value === 'true') return '5'
+  if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
+
+  const minutes = Number(value)
+  if (Number.isInteger(minutes) && (minutes === 0 || (minutes >= 2 && minutes <= 30))) {
+    return String(minutes)
+  }
+
+  return '0'
+}
+
+const isOfflineNotifyEnabled = computed(() => normalizeTgNotifySetting(props.settings.tg_notify) !== '0')
+const hasNodeNotificationOptions = computed(() => (
+  !!props.settings.tg_bot_token &&
+  isOfflineNotifyEnabled.value
+))
+const isWssReportEnabled = computed(() => props.settings.wss_report_enabled === true)
+
+const normalizePriceInput = () => {
+  editForm.value.price = normalizePrice(editForm.value.price)
+}
+
+const openDatePicker = (event) => {
+  const input = event?.currentTarget
+  if (typeof input?.showPicker !== 'function') return
+  try {
+    input.showPicker()
+  } catch (_) {}
+}
+
+watch(
+  () => [editForm.value.auto_renewal, editForm.value.billing_cycle, editForm.value.expire_date],
+  () => {
+    if (!editForm.value.auto_renewal) return
+    const renewal = renewExpireDateIfNeeded(
+      editForm.value.expire_date,
+      editForm.value.billing_cycle,
+      editForm.value.auto_renewal
+    )
+    if (renewal.renewed) {
+      editForm.value.expire_date = renewal.expire_date
+    }
+  }
+)
+
+watch(
+  isWssReportEnabled,
+  (enabled) => {
+    if (!enabled) {
+      editForm.value.connection_mode = 'http'
+    }
+  },
+  { immediate: true }
+)
 
 const emit = defineEmits(['save', 'close', 'toggle-auto-update'])
 

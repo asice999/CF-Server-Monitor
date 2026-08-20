@@ -6,7 +6,9 @@ import './styles/light.css'
 import { currentLang, translations } from './utils/i18n'
 import { http } from './utils/http'
 import { initConfig, hasMultipleApiBases } from './utils/config'
-import { LAST_AGENT_VERSION, LAST_WORKERS_VERSION, VERSION } from './utils/api'
+import { LAST_AGENT_VERSION, LAST_WORKERS_VERSION, VERSION, normalizeLiveSocketTimeoutMinutes } from './utils/api'
+import { resolveDisplayMode } from './utils/displayMode'
+import { getMikusAssetUrl, isMikusThemeEnabled, normalizeThemeOptions, setMikusThemeClass } from './utils/themeOptions'
 import {
   clearTurnstileToken,
   fetchAllTurnstileConfigs,
@@ -24,6 +26,48 @@ const getTranslation = () => {
 
 const trans = () => getTranslation()
 
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+}[char]))
+
+const renderMikusStartupLoading = (siteTitle) => {
+  const loading = document.getElementById('loading')
+  if (!loading || loading.dataset.mikusRendered === '1') return
+
+  const title = escapeHtml(String(siteTitle || 'Komari').trim() || 'Komari')
+  const loliUrl = getMikusAssetUrl('loli.gif')
+  const logoUrl = getMikusAssetUrl('miku.png')
+  const petals = Array.from({ length: 18 }, () => '<span class="mikus-background-petal"></span>').join('')
+  loading.dataset.mikusRendered = '1'
+  loading.classList.add('mikus-startup')
+  loading.innerHTML = `
+    <div class="mikus-sakura-background mikus-startup-sakura" aria-hidden="true">${petals}</div>
+    <div class="mikus-startup-loading">
+      <img class="mikus-startup-gif" src="${loliUrl}" alt="Loading">
+      <div class="mikus-startup-brand">
+        <img class="mikus-startup-logo" src="${logoUrl}" alt="">
+        <span>${title}</span>
+      </div>
+      <div class="mikus-startup-progress" aria-hidden="true">
+        <div class="mikus-startup-progress-fill"></div>
+      </div>
+      <div class="mikus-startup-status">$ Initializing...</div>
+    </div>
+  `
+}
+
+const applyStartupThemeOptions = (config) => {
+  const enabled = isMikusThemeEnabled(config?.theme_options)
+  setMikusThemeClass(enabled)
+  if (enabled) {
+    renderMikusStartupLoading(config?.site_title)
+  }
+}
+
 async function fetchConfig() {
   try {
     const result = await http.get('/api/config', { includeAuth: true, includeTurnstile: true })
@@ -32,9 +76,12 @@ async function fetchConfig() {
         turnstile_enabled: false,
         turnstile_login_enabled: false,
         turnstile_site_key: '',
+        display_mode: 'bar',
         version: '',
         last_workers_version: '',
         last_agent_version: '',
+        frontend_ws_timeout_minutes: 0,
+        theme_options: {},
         verified: false
       }
     }
@@ -45,9 +92,12 @@ async function fetchConfig() {
         turnstile_enabled: false,
         turnstile_login_enabled: false,
         turnstile_site_key: '',
+        display_mode: 'bar',
         version: '',
         last_workers_version: '',
         last_agent_version: '',
+        frontend_ws_timeout_minutes: 0,
+        theme_options: {},
         verified: false
       }
     }
@@ -62,6 +112,9 @@ async function fetchConfig() {
     const isPublic = data.is_public !== false
     const authorization = data.authorization === true
     const siteTitle = data.site_title || ''
+    const displayMode = resolveDisplayMode(data)
+    const themeOptions = normalizeThemeOptions(data.theme_options)
+    const frontendWsTimeoutMinutes = normalizeLiveSocketTimeoutMinutes(data.frontend_ws_timeout_minutes)
 
     if (version) {
       VERSION.value = version
@@ -79,7 +132,10 @@ async function fetchConfig() {
       verified,
       is_public: isPublic,
       authorization,
-      site_title: siteTitle
+      site_title: siteTitle,
+      display_mode: displayMode,
+      frontend_ws_timeout_minutes: frontendWsTimeoutMinutes,
+      theme_options: themeOptions
     }
   } catch (e) {
     console.error('Failed to fetch config:', e)
@@ -88,9 +144,12 @@ async function fetchConfig() {
     turnstile_enabled: false,
     turnstile_login_enabled: false,
     turnstile_site_key: '',
+    display_mode: 'bar',
     version: '',
     last_workers_version: '',
     last_agent_version: '',
+    frontend_ws_timeout_minutes: 0,
+    theme_options: {},
     verified: false
   }
 }
@@ -198,14 +257,35 @@ const renderStartupTurnstile = async (siteKey, apiIndex) => {
   }
 }
 
+const isAdminPath = () => {
+  return window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/')
+}
+
+const bridgeAdminPathToHashRoute = () => {
+  if (!isAdminPath()) return
+  const hash = window.location.hash || ''
+
+  const legacyHashSuffix = hash.startsWith('#/admin')
+    ? hash.slice('#/admin'.length)
+    : hash.startsWith('#admin')
+      ? hash.slice('#admin'.length)
+      : ''
+  const adminHash = `#admin${legacyHashSuffix || window.location.search || ''}`
+  if (hash === adminHash) return
+
+  window.history.replaceState(null, '', `/admin${adminHash}`)
+}
+
 async function initApp() {
+  bridgeAdminPathToHashRoute()
+
   // Load frontend runtime config (apiBase) first so all subsequent
   // HTTP / WebSocket requests go through the configured origin.
   await initConfig()
 
   const isMultipleMode = hasMultipleApiBases()
-  const currentHash = window.location.hash
-  const isAdmin = currentHash.startsWith('#/admin')
+  const currentHash = window.location.hash || ''
+  const isAdmin = isAdminPath() || currentHash.startsWith('#admin') || currentHash.startsWith('#/admin')
 
   // 多站模式公开页面：一次 getAll 获取所有站点配置，检查 Turnstile key 是否可共享。
   let config
@@ -231,8 +311,11 @@ async function initApp() {
         verified: sharedTurnstileSite ? enabledTurnstileSites.every(site => site.verified) : first.data.verified === true,
         is_public: !privateAccess.hasPrivateSite,
         authorization: !privateAccess.hasUnauthorizedPrivateSite,
-        site_title: first.data.site_title || ''
-      } : { turnstile_enabled: false, turnstile_login_enabled: false, turnstile_site_key: '', turnstile_api_index: 0, version: '', last_workers_version: '', last_agent_version: '', verified: false, is_public: true, authorization: false, site_title: '' }
+        site_title: first.data.site_title || '',
+        display_mode: resolveDisplayMode(first.data),
+        frontend_ws_timeout_minutes: normalizeLiveSocketTimeoutMinutes(first.data.frontend_ws_timeout_minutes),
+        theme_options: normalizeThemeOptions(first.data.theme_options)
+      } : { turnstile_enabled: false, turnstile_login_enabled: false, turnstile_site_key: '', turnstile_api_index: 0, version: '', last_workers_version: '', last_agent_version: '', verified: false, is_public: true, authorization: false, site_title: '', display_mode: 'bar', frontend_ws_timeout_minutes: 0, theme_options: {} }
       if (sharedTurnstileSite) {
         config.turnstile_enabled = true
         config.turnstile_site_key = sharedTurnstileSite.siteKey
@@ -242,11 +325,13 @@ async function initApp() {
       LAST_WORKERS_VERSION.value = config.last_workers_version || ''
       LAST_AGENT_VERSION.value = config.last_agent_version || ''
     } catch (_) {
-      config = { turnstile_enabled: false, turnstile_login_enabled: false, turnstile_site_key: '', turnstile_api_index: 0, version: '', last_workers_version: '', last_agent_version: '', verified: false, is_public: true, authorization: false }
+      config = { turnstile_enabled: false, turnstile_login_enabled: false, turnstile_site_key: '', turnstile_api_index: 0, version: '', last_workers_version: '', last_agent_version: '', verified: false, is_public: true, authorization: false, site_title: '', display_mode: 'bar', frontend_ws_timeout_minutes: 0, theme_options: {} }
     }
   } else {
     config = await fetchConfig()
   }
+
+  applyStartupThemeOptions(config)
 
   // 仅全局模式需要在启动时验证 Turnstile；登录模式在 Admin 页面的登录表单中验证
   if (config.turnstile_enabled) {
@@ -266,7 +351,7 @@ async function initApp() {
   app.use(router)
   app.mount('#app').$nextTick(() => {
     if (!isAdmin && !config.is_public && !config.authorization) {
-      router.push('/admin')
+      window.location.replace('/admin#admin')
     }
     const loading = document.getElementById('loading')
     if (loading) {

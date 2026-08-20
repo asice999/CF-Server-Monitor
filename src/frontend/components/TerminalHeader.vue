@@ -12,13 +12,13 @@
           class="lang-btn" 
           :class="{ active: currentLang === 'en' }"
           @click="setLang('en')"
-          title="English"
+          aria-label="English"
         >EN</button>
         <button 
           class="lang-btn" 
           :class="{ active: currentLang === 'zh' }"
           @click="setLang('zh')"
-          title="中文"
+          aria-label="中文"
         >中</button>
       </div>
       <div class="theme-toggle-wrapper">
@@ -27,33 +27,37 @@
             class="theme-btn" 
             :class="{ active: currentTheme === 'auto' }"
             @click="setTheme('auto')"
-            title="Auto - Follow System"
+            aria-label="Auto - Follow System"
           >🌙☀</button>
           <button 
             class="theme-btn" 
             :class="{ active: currentTheme === 'dark' }"
             @click="setTheme('dark')"
-            title="Dark Mode"
+            aria-label="Dark Mode"
           >🌙</button>
           <button 
             class="theme-btn" 
             :class="{ active: currentTheme === 'light' }"
             @click="setTheme('light')"
-            title="Light Mode"
+            aria-label="Light Mode"
           >☀</button>
         </div>
       </div>
-      <router-link :to="isAdminPage ? '/' : '/admin'" class="admin-link-header">⚙ {{ isAdminPage ? t('dashboard') : t('admin') }}</router-link>
+      <a v-if="isAdminPage" href="/#/" class="admin-link-header"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-home">
+  <path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1h-2z"/>
+</svg></a>
+      <a v-else :href="adminHref" class="admin-link-header"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-settings"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></svg></a>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { t, setLanguage, getLanguage } from '../utils/i18n'
 import { useTheme } from '../composables/useTheme'
 import { DEFAULT_SITE_TITLE } from '../utils/constants'
+import { hasMultipleApiBases } from '../utils/config'
 
 defineProps({
   title: {
@@ -66,6 +70,7 @@ const { currentTheme, setTheme } = useTheme()
 const currentLang = ref('en')
 const route = useRoute()
 const isAdminPage = ref(route.path === '/admin')
+const adminHref = computed(() => hasMultipleApiBases() ? '/#/admin' : '/admin#/admin')
 
 const setLang = (lang) => {
   setLanguage(lang)

@@ -35,6 +35,12 @@ function generateMetrics(baseTimestamp, serverIdx, hourOffset) {
     swap_used: Math.floor(Math.random() * 512).toString(),
     disk_total: (serverIdx === 0 ? 200 : 100).toString(),
     disk_used: '90',
+    disk_read_bps: Math.floor(Math.random() * 10_000_000).toString(),
+    disk_write_bps: Math.floor(Math.random() * 6_000_000).toString(),
+    disk_read_iops: (Math.random() * 200).toFixed(2),
+    disk_write_iops: (Math.random() * 120).toFixed(2),
+    disk_await_ms: (Math.random() * 30).toFixed(2),
+    disk_util: (Math.random() * 80).toFixed(2),
     load_avg: `${(baseline.load_avg + (Math.random() - 0.5) * 0.8).toFixed(2)} ${(baseline.load_avg + (Math.random() - 0.5) * 0.6).toFixed(2)} ${(baseline.load_avg + (Math.random() - 0.5) * 0.4).toFixed(2)}`,
     net_rx: Math.floor(Math.random() * 10000 + 5000).toString(),
     net_tx: Math.floor(Math.random() * 5000 + 2500).toString(),
@@ -75,7 +81,10 @@ const servers = [
     server_group: 'Production',
     tags: 'production,us-east,edge',
     note: 'Primary production node',
-    price: '$15/mo',
+    price: '15.00',
+    billing_cycle: 'month',
+    auto_renewal: '1',
+    currency: '$',
     expire_date: '2026-12-31',
     traffic_limit: '2TB',
     is_hidden: '0',
@@ -87,7 +96,10 @@ const servers = [
     server_group: 'Production',
     tags: 'production,jp-tokyo',
     note: 'Hidden standby node',
-    price: '$10/mo',
+    price: '10.00',
+    billing_cycle: 'month',
+    auto_renewal: '0',
+    currency: '$',
     expire_date: '2026-06-30',
     traffic_limit: '1TB',
     is_hidden: '1',
@@ -116,12 +128,18 @@ CREATE TABLE IF NOT EXISTS servers (
   tags TEXT DEFAULT '',
   note TEXT DEFAULT '',
   price TEXT DEFAULT '',
+  billing_cycle TEXT DEFAULT 'month',
+  auto_renewal TEXT DEFAULT '0',
+  currency TEXT DEFAULT '¥',
   expire_date TEXT DEFAULT '',
   traffic_limit TEXT DEFAULT '',
   traffic_calc_type TEXT DEFAULT 'total',
+  "interface" TEXT DEFAULT '',
   reset_day INTEGER DEFAULT 1,
   collect_interval INTEGER DEFAULT 0,
   report_interval INTEGER DEFAULT 60,
+  wss_report_interval INTEGER DEFAULT 2,
+  connection_mode TEXT DEFAULT 'auto',
   auto_update TEXT DEFAULT '0',
   is_hidden TEXT DEFAULT '0',
   sort_order INTEGER DEFAULT 0
@@ -156,6 +174,12 @@ CREATE TABLE IF NOT EXISTS metrics_history (
   swap_used REAL DEFAULT 0,
   disk_total REAL DEFAULT 0,
   disk_used REAL DEFAULT 0,
+  disk_read_bps REAL DEFAULT 0,
+  disk_write_bps REAL DEFAULT 0,
+  disk_read_iops REAL DEFAULT 0,
+  disk_write_iops REAL DEFAULT 0,
+  disk_await_ms REAL DEFAULT 0,
+  disk_util REAL DEFAULT 0,
   cpu_cores INTEGER DEFAULT 0,
   cpu_info TEXT DEFAULT '',
   gpu REAL DEFAULT NULL,
@@ -179,7 +203,9 @@ const appearanceOptions = {
   site_title: 'Test',
   custom_bg: 'https://cdn.nodeimage.com/i/fux0OSoFzVZQsn9uZmSDbIpKzZw2r8GW.webp',
   custom_head: '<meta content="test">',
-  custom_script: 'console.log("Hello, World!");'
+  custom_script: 'console.log("Hello, World!");',
+  display_mode: 'bar',
+  theme_options: { a: 1, b: 2 }
 };
 
 const siteOptions = {
@@ -188,9 +214,9 @@ const siteOptions = {
   show_price: 'true',
   show_expire: 'true',
   show_tf: 'true',
-  show_time: 'true',
-  show_long_history: 'true',
-  tg_notify: 'false',
+  frontend_ws_timeout_minutes: '0',
+  long_history_points: '120',
+  tg_notify: '0',
   tg_bot_token: '',
   tg_chat_id: '',
   turnstile_site_key: '0x4AAAAAADnx_ErgRBFcm5Il'
@@ -205,9 +231,10 @@ const serverLatestMetrics = {};
 
 for (const server of servers) {
   sql += `INSERT INTO servers (
-    id, name, server_group, tags, note, price, expire_date, traffic_limit, is_hidden, sort_order
+    id, name, server_group, tags, note, price, billing_cycle, auto_renewal, currency, expire_date, traffic_limit, is_hidden, sort_order
   ) VALUES (
     '${server.id}', '${server.name}', '${server.server_group}', '${server.tags}', '${server.note}', '${server.price}',
+    '${server.billing_cycle}', '${server.auto_renewal}', '${server.currency}',
     '${server.expire_date}', '${server.traffic_limit}',
     '${server.is_hidden}', ${server.sort_order}
   );\n`;
@@ -274,6 +301,7 @@ INSERT INTO metrics_history (
   loss_ct, loss_cu, loss_cm, loss_bd,
   ram_total, ram_used, swap_total, swap_used,
   disk_total, disk_used,
+  disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, disk_await_ms, disk_util,
   cpu_cores, cpu_info, gpu, gpu_info, arch, os,
   ip_v4, ip_v6, boot_time,
   net_rx_monthly, net_tx_monthly,
@@ -304,6 +332,12 @@ INSERT INTO metrics_history (
   ${parseFloat(metrics.swap_used)},
   ${parseFloat(metrics.disk_total)},
   ${parseFloat(metrics.disk_used)},
+  ${parseFloat(metrics.disk_read_bps)},
+  ${parseFloat(metrics.disk_write_bps)},
+  ${parseFloat(metrics.disk_read_iops)},
+  ${parseFloat(metrics.disk_write_iops)},
+  ${parseFloat(metrics.disk_await_ms)},
+  ${parseFloat(metrics.disk_util)},
   ${parseInt(metrics.cpu_cores)},
   '${metrics.cpu_info}',
   ${parseFloat(metrics.gpu)},

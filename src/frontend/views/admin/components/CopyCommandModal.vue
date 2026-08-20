@@ -6,15 +6,35 @@
         <button class="modal-close" @click="$emit('close')">✕</button>
       </div>
 
-      <div class="form-group">
-        <label class="form-label">{{ trans.targetOs }}</label>
-        <select :value="targetOs" class="form-select" @change="$emit('update:target-os', $event.target.value)">
-          <option value="linux">Linux (Ubuntu/Debian/CentOS)</option>
-          <option value="alpine">Alpine Linux</option>
-          <option value="openwrt">OpenWrt / LEDE / ImmortalWrt</option>
-          <option value="mac">macOS (Intel / Apple Silicon)</option>
-          <option value="windows">Windows</option>
-        </select>
+      <div class="form-row">
+        <div class="form-group flex-1">
+          <label class="form-label">{{ trans.targetOs }}</label>
+          <select :value="targetOs" class="form-select" @change="$emit('update:target-os', $event.target.value)">
+            <option value="linux">Linux/OpenWrt/Synology DSM/FreeBSD/macOS</option>
+            <option value="windows">Windows</option>
+          </select>
+        </div>
+
+        <div class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.ghProxy }}
+            <HelpTooltip :text="trans.ghProxyTip" />
+          </label>
+          <input
+            type="text"
+            list="ghProxyList"
+            :value="installGhProxy"
+            class="form-input"
+            :placeholder="trans.ghProxyPlaceholder"
+            @input="$emit('update:install-gh-proxy', $event.target.value)"
+          >
+          <datalist id="ghProxyList">
+            <option value="https://ghfast.top/">https://ghfast.top/</option>
+            <option value="https://ghproxy.net/">https://ghproxy.net/</option>
+            <option value="https://gh.llkk.cc/">https://gh.llkk.cc/</option>
+            <option value="https://gh-proxy.com/">https://gh-proxy.com/</option>
+          </datalist>
+        </div>
       </div>
 
       <div class="config-list">
@@ -25,6 +45,14 @@
         <div class="config-row">
           <span class="config-label">{{ trans.reportInterval }}</span>
           <span class="config-value">{{ formatWithUnit(reportInterval, 's') }}</span>
+        </div>
+        <div v-if="connectionMode === 'auto'" class="config-row">
+          <span class="config-label">{{ trans.wssReportInterval }}</span>
+          <span class="config-value">{{ formatWithUnit(wssReportInterval, 's') }}</span>
+        </div>
+        <div class="config-row">
+          <span class="config-label">{{ trans.connectionMode }}</span>
+          <span class="config-value">{{ connectionMode === 'http' ? trans.connectionModeHttp : trans.connectionModeAuto }}</span>
         </div>
         <div class="config-row">
           <span class="config-label">{{ trans.trafficResetDay }}</span>
@@ -55,6 +83,10 @@
           <span class="config-value">{{ isBlank(customBd) ? '-' : customBd }}</span>
         </div>
         <div class="config-row">
+          <span class="config-label">{{ trans.networkInterface }}</span>
+          <span class="config-value">{{ isBlank(networkInterface) ? '-' : networkInterface }}</span>
+        </div>
+        <div class="config-row">
           <span class="config-label">{{ trans.rxCorrection }} (GB)</span>
           <span class="config-value">{{ formatWithUnit(rxCorrection, 'GB') }}</span>
         </div>
@@ -83,17 +115,23 @@
 </template>
 
 <script setup>
+import HelpTooltip from '../../../components/HelpTooltip.vue'
+
 defineProps({
   trans: { type: Object, required: true },
   show: { type: Boolean, default: false },
   currentServerName: { type: String, default: '' },
   targetOs: { type: String, default: 'linux' },
+  installGhProxy: { type: String, default: '' },
   collectInterval: { type: [Number, String], default: 0 },
   reportInterval: { type: [Number, String], default: 60 },
+  wssReportInterval: { type: [Number, String], default: 2 },
+  connectionMode: { type: String, default: 'auto' },
   customCt: { type: String, default: '' },
   customCu: { type: String, default: '' },
   customCm: { type: String, default: '' },
   customBd: { type: String, default: '' },
+  networkInterface: { type: String, default: '' },
   resetDay: { type: [Number, String], default: 1 },
   rxCorrection: { type: [Number, String], default: '' },
   txCorrection: { type: [Number, String], default: '' },
@@ -102,7 +140,13 @@ defineProps({
   copiedCmd: { type: Boolean, default: false }
 })
 
-defineEmits(['close', 'copy-cmd', 'open-edit-from-copy', 'update:target-os'])
+defineEmits([
+  'close',
+  'copy-cmd',
+  'open-edit-from-copy',
+  'update:target-os',
+  'update:install-gh-proxy'
+])
 
 const isBlank = (value) => value === '' || value === null || value === undefined
 const formatWithUnit = (value, unit) => (isBlank(value) ? '-' : `${value} ${unit}`)
